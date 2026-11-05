@@ -1,0 +1,4 @@
+#!/bin/sh
+# Mark boot complete and keep this consoleless initial NSH alive by waiting
+# for a foreground command that sleeps until reboot. Do not invoke manually.
+led_control boot_complete_wait
