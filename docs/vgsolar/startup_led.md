@@ -1,6 +1,8 @@
 # 第22篇：核心板启动指示灯
 
-VGSolar核心板蓝灯PD11为低有效，应用完成基本平台初始化后，每125ms翻转一次，完整闪烁频率4Hz。`rcS`执行末尾、通知MAVLink启动完成后，执行本板`rc.board_boot_complete`，取消闪烁定时并把蓝灯常亮。
+更新说明（2026-11-09）：当前启动钩子已采用 `boot_complete_wait`，下文同步其生命周期行为；原始灯效验证记录保留，本次未新增实板测量。
+
+VGSolar核心板蓝灯PD11为低有效，应用完成基本平台初始化后，每125ms翻转一次，完整闪烁频率4Hz。`rcS`执行末尾、通知MAVLink启动完成后，执行本板 `rc.board_boot_complete`，调用 `led_control boot_complete_wait` 取消闪烁并把蓝灯常亮，随后前台等待到重启，使初始 NSH 任务保持存活。该等待由启动脚本执行，USB MAVLink Shell 仍可使用。
 
 常亮只表示启动脚本到达末尾，不表示传感器全部正常、校准成功、GPS就绪、允许解锁或机器人可自动运行。启动脚本仍可能记录了非致命错误；必须继续看QGC消息及NSH状态。若启动中途卡住，完成钩子未执行，蓝灯继续闪烁。应用尚未进入平台初始化、ROM DFU和PX4引导程序阶段不由此逻辑控制。
 
@@ -11,7 +13,7 @@ VGSolar核心板蓝灯PD11为低有效，应用完成基本平台初始化后，
 - `boards/vg/vgsolar/src/led.c`：HRT定时闪烁、原子取消与常亮。
 - `boards/vg/vgsolar/src/init.c`：平台和LED驱动启动后开启闪烁。
 - `boards/vg/vgsolar/src/board_config.h`：引脚与灯所有权声明。
-- `src/systemcmds/led_control/led_control.cpp`：仅本板增加boot_complete和boot_status命令。
+- `src/systemcmds/led_control/led_control.cpp`：本板提供 `boot_complete`、`boot_complete_wait` 和 `boot_status`；当前启动脚本使用等待版本。
 - `ROMFS/px4fmu_common/init.d/rcS`：启动脚本末尾可选板级完成钩子；没有该钩子的其他板保持原行为。
 - `boards/vg/vgsolar/init/rc.board_boot_complete`：本板完成标记。
 
@@ -19,7 +21,7 @@ VGSolar核心板蓝灯PD11为低有效，应用完成基本平台初始化后，
 led_control boot_status
 ```
 
-只读状态应显示startup complete / steady。`led_control boot_complete`用于启动脚本，不要手动提前执行以伪造启动完成。
+只读状态应显示 startup complete / steady。不要手动执行 `boot_complete` 提前标记启动完成，也不要在交互 Shell 中运行 `boot_complete_wait`，后者会等待到重启。生命周期修复及旧 HardFault 记录的范围见 [hardware_bringup.md](hardware_bringup.md)。
 
 ## 验证与实板步骤
 

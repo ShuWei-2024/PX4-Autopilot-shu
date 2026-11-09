@@ -1,5 +1,7 @@
 # 第03步补充：QGC实时显示PC0电压与吸盘压力
 
+> 阶段说明（2026-11-09）：本文保留第 03 步压力电压模拟与 QGC 显示记录。后续增加了 SUCT_PKPA/SUCT_HLT 和 SCALED_PRESSURE2 软件遥测路径，见 [software_parity.md](software_parity.md)；原有 DEBUG_VECT 保留。原始 QGC 截图不能证明新增消息或真实压力精度已验收。
+
 日期：2026-10-31。分支：`feat/vgsolar-px4-migration`。该说明与QGC压力遥测实现一同纳入功能提交。
 
 ## 目标和范围

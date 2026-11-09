@@ -1,5 +1,7 @@
 # VGSolar 实机启动记录（2026-10-29）
 
+> 历史记录说明（2026-11-09）：本文保留 2026-10-29～30 的 B0/B1 启动、方向排查和原始实板结果，文中“接下来”“待迁移”等属于当时阶段。当前分支为 `feat/v1.17_VGSolar`，现状见 [README.md](README.md)、[PORTING.md](PORTING.md)，后续启动与修复见 [hardware_bringup.md](../../../docs/vgsolar/hardware_bringup.md)。这些历史数据不证明当前固件已完成同样的实机验证。
+
 证据来自用户在 QGroundControl MAVLink Console 中提交的 NSH 输出，未由主机工具直接读取硬件。
 
 - `ver all`：VG_VGSOLAR，PX4 1.17.0，Git d6f12ad1c4f70ad3230afd7d86e971421e02fef4，STM32H7 rev V。

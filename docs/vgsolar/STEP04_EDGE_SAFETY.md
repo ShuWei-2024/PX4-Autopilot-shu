@@ -1,5 +1,7 @@
 # 迁移第04步：DYP-A02边缘检测与安全请求
 
+> 阶段说明（2026-11-09）：本文记录最初仅发布安全请求的实现阶段。当前分支已在 `DifferentialActControl` 接入安全状态/时效及模式输出门控，“不接入执行输出”仅描述本步当时的范围。`VGS_SAFE_EN` 仍默认 0，实际停车时延与故障行为待实板验收。当前清单见 [PORTING.md](../../boards/vg/vgsolar/PORTING.md)。
+
 ## 本步范围
 
 PX4新增vgsolar_safety模块，订阅两路DYP-A02的distance_sensor，发布vgsolar_safety_status并写入ULog。本步复现APM外侧测距判断，不接入PWM、电机、泵阀、Commander急停或其他执行输出。

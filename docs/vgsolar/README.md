@@ -1,39 +1,47 @@
-# VGSolar PX4 功能迁移
+# VGSolar PX4 功能迁移：当前状态与阅读目录
 
-2026-10-31开始；开发分支`feat/vgsolar-px4-migration`，基础版本`1501409c6c`。
-APM参考：Ubuntu-22.04 `/home/yuyuyyu/rover`，commit `5505db87886beb85383020d9d1376982babc988c`。
+更新日期：2026-11-09。当前分支 `feat/v1.17_VGSolar`，文档核对代码基线 `6031d90087`。本分支来自 `feat/vgsolar-px4-migration`；早期迁移起点为 `1501409c6c`，不是另一条 Rover/Copter 硬件基线分支的配置。
 
-总体任务书：Windows `E:/shuwei/px4/outputs/VGSolar_APM到PX4功能迁移计划.md`。
-本目录记录每一步实际实现、验证和交付，不把总体计划中的待开发项当成现有功能。
+APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1376982babc988c`。早期任务书位于 Windows `E:/shuwei/px4/outputs/VGSolar_APM到PX4功能迁移计划.md`，该本地路径不随仓库发布。
 
-## 本轮用户决定
+## 当前实现
 
-用户要求基于现有板级版本逐步迁移光伏机器人功能，校准及磁航向问题暂缓。
-因此先推进不依赖磁航向的输入驱动和通信；原任务书中“传感器验收后才进入后续阶段”在这些独立工作上按用户决定调整。
-磁航向仍标记待验收，自动按航向转弯和导航不由本轮工作放行。现有IMU/罗盘代码、安装旋转、校准和MBE设置保持原状。
+- 输入：两路 DYP-A02、负压/红外、左右编码器；编码器有效 CPR 配置后可发布标准轮角/轮速。
+- 底盘：五路原生 PWM、差速 Rover、可选轮速反馈、安全及业务模式输出门控。
+- 通信：NCU 状态回传及速度/转弯/导航/系统/参数命令处理；USART3 SWAP、寄存器只读诊断与工作队列内打开/关闭串口。2BLD6010 为 RS485 只读遥测。
+- 业务：VGSolar 动态模式、清洁机构状态机、急停/待释放处理、掉压告警、转弯及点到点导航。
+- 诊断：压力遥测、项目电量换算、ULog 链路/事件日志、启动蓝灯，以及启动任务生命周期、解锁 PWM 瞬态和无 5V 监测能力的适配。
 
-## 步骤与状态
+软件行为、参数和实现边界见 [software_parity.md](software_parity.md) 及 [模式说明](../../src/modules/vgsolar_mode/README.md)。软件路径已实现不等于完整 APM 动态行为或整车验收。
 
-| 步骤 | 内容 | 状态 |
-|---|---|---|
-| 01 | 左右DYP-A02 UART采集、有效/失效发布 | 已实现；软件测试及板型构建记录见交付文件，实板待测 |
-| 02 | 用户要求提前配置五路PWM，先测电子波形 | 用户反馈基本正常；已取得第1路约50Hz/1.5ms视频；完整量测/启动/故障回归待补 |
-| 03 | 负压ADC、红外输入、诊断日志及QGC实时检查遥测 | QGC实收已由用户截图确认（约1.573V、-49.08kPa、valid=1）；电压模拟与实时显示通过，真实压力传感器精度/红外实测待验 |
-| 04 | 边缘检测判断、超时/越界消抖与安全请求 | 软件逻辑、主机测试和板型构建完成；实板测距/断线台架待测，执行器联锁未实现 |
-| 05 | 左右编码器读数、方向/倍率验证 | 软件实现和板型构建完成；GPIO边沿/方向及倍率仍待实板测试，不发布标定轮速 |
-| 06 | 编码器台架验收准备 + NCU只读链路 | 软件实现/协议测试和板型构建完成；编码器边沿、USART3电平与 NCU 串口实板测试待验 |
-| 后续 | 输出波形、安全层、底盘闭环、清洁状态机、导航 | 按总体任务书逐项实施；每步独立验收 |
+## 启动与默认状态
 
-第一步详情：[STEP01_DYP_A02.md](STEP01_DYP_A02.md)。默认VGS_RNG_EN=0；手动台架验证通过后才选择启用开机启动。用户随后要求先测试PWM，执行顺序调整见[五路PWM台架说明](STEP02_PWM_BENCH.md)：原生PWM已编入，五路功能默认禁用；DShot/PX4IO未编入，整车带动力测试未放行。
+板级脚本自动启动 `vgsolar_link` 和 `vgsolar_mode`。模式号动态分配，不固定为 APM 的 17；任务运行不等于已经进入该模式。
 
-不自动推送、不直接刷写实板；现场日志和参数以每轮实际采集为准。保持现有`.vscode/settings.json`修改，不纳入功能提交。
+`VGS_ENABLE`、`VGS_CLN_EN`、`VGS_RNG_EN`、`VGS_IN_EN`、`VGS_SAFE_EN`、`VGS_ESC_EN` 默认 0；编码器手动启动，CPR 默认 0，轮速闭环另行使能。五路 PWM 功能默认 0，DShot/PX4IO 未启用。已保存参数不受 `set-default` 覆盖，当前实物状态以回读为准。
 
-第03步说明：[负压与红外实现过程和实板步骤](STEP03_PRESSURE_IR.md)。压力遥测经现有`DEBUG_VECT` MAVLink流发送，QGC Analyze Tools中的MAVLink Inspector可实时查看/绘图；这不是Fly View标准压力仪表。升级前先执行PWM清理脚本，避免沿用已保存的持续上锁输出；VGS_IN_EN默认0，先手动收数。
+## 推荐阅读顺序
 
-QGC遥测补充说明：[PC0电压与吸盘压力实时显示](STEP03_QGC_PRESSURE_TELEMETRY.md)。
+1. [板级入口](../../boards/vg/vgsolar/README.md)：引脚、启动、默认值、构建与烧写适用范围。
+2. [现状与实机验收清单](../../boards/vg/vgsolar/PORTING.md)：已实现内容、已有证据、待验项目。
+3. [软件行为与参数](software_parity.md)：APM 对应关系、机构释放、电量和导航行为。
+4. [工具与测试](../../Tools/vgsolar/README.md)、[NCU 客户端](../../Tools/vgsolar/README_ncu_client.md)：离线入口和当前双向串口联调方法。
+5. [核心板启动及近期修复](hardware_bringup.md)、[启动蓝灯](startup_led.md)、[阀泵测试](VALVE_PUMP_BENCH.md)：按具体问题查阅。
 
-第04步实现过程与实板步骤：[DYP-A02边缘检测安全请求](STEP04_EDGE_SAFETY.md)。默认VGS_SAFE_EN=0；仅发布锁存请求，不联动执行器。
+## 早期实现过程
 
-第05步实现过程与实板步骤：[左右轮编码器原始计数](STEP05_WHEEL_ENCODERS.md)。模块手动启停，发布原始累计计数、采样增量、方向和无效相位跳变；未设置每圈计数前不转换为轮速或里程。
+以下文件保留各步骤当时的实现与验证记录。“未接入输出”“只读”“手动启动”等阶段性结论不能直接作为当前全分支状态：
 
-第06批合并说明与验收步骤：[编码器台架验收准备与 NCU 只读链路](STEP06_ENCODERS_NCU_READONLY.md)。NCU 使用 USART3 `/dev/ttyS2`，协议状态体为 APM 当前源码确认的 34 字节；USART3 不再用作 NuttX 控制台，USB QGC Shell 保持可用。只读模块手动启动，不执行任何 NCU 命令。
+- [STEP01_DYP_A02.md](STEP01_DYP_A02.md)、[实现过程](STEP01_DYP_A02_IMPLEMENTATION.md)：双超声波驱动。
+- [STEP02_PWM_BENCH.md](STEP02_PWM_BENCH.md)：五路 PWM 配置与原始测试流程。
+- [STEP03_PRESSURE_IR.md](STEP03_PRESSURE_IR.md)、[QGC 显示](STEP03_QGC_PRESSURE_TELEMETRY.md)：负压/红外和压力遥测。
+- [STEP04_EDGE_SAFETY.md](STEP04_EDGE_SAFETY.md)：最初仅发布边缘安全请求，后续已接入差速输出门控。
+- [STEP05_WHEEL_ENCODERS.md](STEP05_WHEEL_ENCODERS.md)：最初原始计数，后续增加可配置的标准轮角/轮速换算和可选闭环。
+- [STEP06_ENCODERS_NCU_READONLY.md](STEP06_ENCODERS_NCU_READONLY.md)：最初只读 NCU 阶段，后续已接入命令与反馈并改为板级自动启动。
+- [ci_build_compatibility.md](ci_build_compatibility.md)：可选安全参数对标准 Rover/SITL 编译的兼容修复。
+
+## 已有证据与下一步
+
+已有早期板载启动/姿态/SD 记录、部分 PWM 反馈和 PC0 电压模拟/QGC 显示记录。真实压力精度、IR、编码器、RK3588 稳定通信、完整输出波形、机构负载及整车循环仍需逐项补证。11 月 6 日的软件修复与现场现象见启动记录。
+
+侧向姿态、校准与持续航向尚未完成验收；后续独立输入和通信开发不代表依赖航向的自动任务已放行。本次仅更新文档，未增加实机证据。
