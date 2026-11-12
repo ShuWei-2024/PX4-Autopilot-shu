@@ -42,14 +42,16 @@
 #define GPIO_nLED_RED  (GPIO_OUTPUT|GPIO_OPENDRAIN|GPIO_SPEED_50MHz|GPIO_OUTPUT_SET|GPIO_PORTD|GPIO_PIN10)
 #define GPIO_nLED_BLUE (GPIO_OUTPUT|GPIO_OPENDRAIN|GPIO_SPEED_50MHz|GPIO_OUTPUT_SET|GPIO_PORTD|GPIO_PIN11)
 #define BOARD_HAS_CONTROL_STATUS_LEDS 1
-#define BOARD_OVERLOAD_LED LED_RED
-// Blue is owned by the startup indicator, not Commander arming blink.
+// Both discrete LEDs belong to the startup indicator. Commander reports
+// overload and arming state through its normal topics, not these GPIOs.
 #define VGSOLAR_BOOT_LED 1
 #ifndef __ASSEMBLY__
 __BEGIN_DECLS
 void vgsolar_boot_led_start(void);
 void vgsolar_boot_led_complete(void);
 bool vgsolar_boot_led_completed(void);
+void vgsolar_boot_led_fail(void);
+bool vgsolar_boot_led_failed(void);
 __END_DECLS
 #endif
 

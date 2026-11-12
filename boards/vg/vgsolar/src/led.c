@@ -240,37 +240,69 @@ void board_autoled_off(int led)
 // HRT is available after px4_platform_init. Only GPIO writes run in the callback.
 static struct hrt_call boot_led_call;
 static bool boot_led_done;
+static bool boot_led_failed;
 static bool boot_led_on;
+static bool boot_led_phase;
 
 static void boot_led_tick(void *arg)
 {
- (void)arg;
- boot_led_on = !boot_led_on;
- stm32_gpiowrite(GPIO_nLED_BLUE, !boot_led_on);
+	(void)arg;
+	boot_led_phase = !boot_led_phase;
+
+	// Initializing: 2 Hz. Latched startup failure: 4 Hz.
+	if (boot_led_failed || boot_led_phase) {
+		boot_led_on = !boot_led_on;
+		stm32_gpiowrite(GPIO_nLED_RED, !boot_led_on);
+	}
 }
 
 void vgsolar_boot_led_start(void)
 {
- boot_led_done = false;
- boot_led_on = true;
- stm32_gpiowrite(GPIO_nLED_BLUE, false);
- // Toggle every 125 ms: four complete flashes per second.
- hrt_call_every(&boot_led_call, 125000, 125000, boot_led_tick, NULL);
+	boot_led_done = false;
+	boot_led_failed = false;
+	boot_led_on = true;
+	boot_led_phase = false;
+	stm32_gpiowrite(GPIO_nLED_BLUE, true);
+	stm32_gpiowrite(GPIO_nLED_RED, false);
+	hrt_call_every(&boot_led_call, 125000, 125000, boot_led_tick, NULL);
 }
 
 void vgsolar_boot_led_complete(void)
 {
- // Keep cancel and final GPIO update atomic against the HRT interrupt.
- const irqstate_t flags = enter_critical_section();
- hrt_cancel(&boot_led_call);
- boot_led_done = true;
- boot_led_on = true;
- stm32_gpiowrite(GPIO_nLED_BLUE, false);
- leave_critical_section(flags);
+	// A lower-level initialization failure cannot be cleared by rcS finishing.
+	const irqstate_t flags = enter_critical_section();
+
+	if (!boot_led_failed) {
+		hrt_cancel(&boot_led_call);
+		boot_led_done = true;
+		boot_led_on = false;
+		stm32_gpiowrite(GPIO_nLED_RED, true);
+		stm32_gpiowrite(GPIO_nLED_BLUE, false);
+	}
+
+	leave_critical_section(flags);
+}
+
+void vgsolar_boot_led_fail(void)
+{
+	const irqstate_t flags = enter_critical_section();
+	boot_led_failed = true;
+	boot_led_done = false;
+	boot_led_on = true;
+	stm32_gpiowrite(GPIO_nLED_BLUE, true);
+	stm32_gpiowrite(GPIO_nLED_RED, false);
+	// Also supports failure reporting after a previous completion command.
+	hrt_call_every(&boot_led_call, 125000, 125000, boot_led_tick, NULL);
+	leave_critical_section(flags);
 }
 
 bool vgsolar_boot_led_completed(void)
 {
- return boot_led_done;
+	return boot_led_done;
+}
+
+bool vgsolar_boot_led_failed(void)
+{
+	return boot_led_failed;
 }
 #endif

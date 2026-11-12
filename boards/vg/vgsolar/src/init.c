@@ -90,7 +90,8 @@ __EXPORT int board_app_initialize(uintptr_t arg)
     (void)arg;
 #if !defined(BOOTLOADER)
     px4_platform_init();
-    if (board_dma_alloc_init() < 0) { syslog(LOG_ERR, "[vgsolar] DMA allocation failed\n"); }
+    const bool dma_failed = board_dma_alloc_init() < 0;
+    if (dma_failed) { syslog(LOG_ERR, "[vgsolar] DMA allocation failed\n"); }
 #if defined(SERIAL_HAVE_RXDMA)
     static struct hrt_call serial_dma_call;
     hrt_call_every(&serial_dma_call, 1000, 1000, (hrt_callout)stm32_serial_dma_poll, NULL);
@@ -99,11 +100,12 @@ __EXPORT int board_app_initialize(uintptr_t arg)
     led_off(LED_RED);
     led_off(LED_BLUE);
     vgsolar_boot_led_start();
-    if (board_hardfault_init(2, true) != 0) { led_on(LED_RED); }
+    const bool hardfault_pending = board_hardfault_init(2, true) != 0;
+    if (dma_failed || hardfault_pending) { vgsolar_boot_led_fail(); }
 #ifdef CONFIG_MMCSD
     if (stm32_sdio_initialize() != OK) {
         syslog(LOG_ERR, "[vgsolar] SD initialization failed\n");
-        led_on(LED_RED);
+        vgsolar_boot_led_fail();
     }
 #endif
     px4_platform_configure();

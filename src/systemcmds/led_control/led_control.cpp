@@ -133,12 +133,18 @@ led_control_main(int argc, char *argv[])
 			vgsolar_wait_for_reboot();
 		}
 
-		return 0;
+		return vgsolar_boot_led_completed() ? 0 : 1;
+	}
+
+	if (argc == 2 && strcmp(argv[1], "boot_failed_wait") == 0) {
+		vgsolar_boot_led_fail();
+		vgsolar_wait_for_reboot();
 	}
 
 	if (argc == 2 && strcmp(argv[1], "boot_status") == 0) {
-		PX4_INFO("VGSolar blue LED: %s (not an arming-ready indication)",
-			 vgsolar_boot_led_completed() ? "startup complete / steady" : "initializing / flashing");
+		PX4_INFO("VGSolar startup: %s (not arming readiness or a QGC connection test)",
+			 vgsolar_boot_led_failed() ? "FAILED / red fast flash, blue off" :
+			 (vgsolar_boot_led_completed() ? "checks passed / blue steady, red off" : "initializing / red slow flash, blue off"));
 		return 0;
 	}
 
@@ -291,6 +297,7 @@ $ led_control blink -c blue -l 0 -n 5
 
 #ifdef VGSOLAR_BOOT_LED
 	PRINT_MODULE_USAGE_COMMAND_DESCR("boot_status", "Read the board startup indicator state");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("boot_failed_wait", "Latch startup failure and keep its owner alive (startup script only)");
 	PRINT_MODULE_USAGE_COMMAND_DESCR("boot_complete", "Mark board startup complete (startup script only)");
 	PRINT_MODULE_USAGE_COMMAND_DESCR("boot_complete_wait", "Mark startup complete and keep its owner alive (startup script only)");
 #endif

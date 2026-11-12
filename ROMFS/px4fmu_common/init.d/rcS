@@ -669,11 +669,9 @@ unset PARAM_FILE
 unset PARAM_BACKUP_FILE
 unset PARAM_DEFAULTS_VER
 unset RC_INPUT_ARGS
-unset STORAGE_AVAILABLE
 unset SDCARD_EXT_PATH
 unset SDCARD_FORMAT
 unset STARTUP_TUNE
-unset VEHICLE_TYPE
 
 #
 # Boot is complete, inform MAVLink app(s) that the system is now fully up and running.
@@ -687,3 +685,5 @@ then
  . $BOARD_RC_BOOT_COMPLETE
 fi
 unset BOARD_RC_BOOT_COMPLETE
+unset STORAGE_AVAILABLE
+unset VEHICLE_TYPE

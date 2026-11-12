@@ -1,4 +1,43 @@
 #!/bin/sh
-# Mark boot complete and keep this consoleless initial NSH alive by waiting
-# for a foreground command that sleeps until reboot. Do not invoke manually.
+# This hook runs after mavlink boot_complete. A finished rcS is not sufficient:
+# missing/unmounted TF storage and missing core services must never show success.
+# Always retain the initial consoleless NSH task group, including on failure.
+if [ $STORAGE_AVAILABLE != yes ]
+then
+	echo "ERROR [vgsolar] startup check failed: TF card not mounted"
+	led_control boot_failed_wait
+fi
+
+if [ $VEHICLE_TYPE = none ]
+then
+	echo "ERROR [vgsolar] startup check failed: no vehicle configuration"
+	led_control boot_failed_wait
+fi
+
+if ! commander status
+then
+	echo "ERROR [vgsolar] startup check failed: commander not running"
+	led_control boot_failed_wait
+fi
+
+if ! sensors status
+then
+	echo "ERROR [vgsolar] startup check failed: sensors not running"
+	led_control boot_failed_wait
+fi
+
+# The USB manager waits for VBUS and starts MAVLink asynchronously. Its presence
+# does not assert that a host has connected or that a MAVLink instance exists yet.
+if ! param greater SYS_USB_AUTO 0
+then
+	echo "ERROR [vgsolar] startup check failed: USB communication disabled"
+	led_control boot_failed_wait
+fi
+
+if ! cdcacm_autostart status
+then
+	echo "ERROR [vgsolar] startup check failed: USB manager not running"
+	led_control boot_failed_wait
+fi
+
 led_control boot_complete_wait
