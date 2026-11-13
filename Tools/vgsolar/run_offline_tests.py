@@ -53,9 +53,21 @@ def main():
                 failures += 1
     print(f"RESULT: {len(tests) - failures}/{len(tests)} passed", flush=True)
     if args.all:
-        for script in ("ncu_client_test.py", "check_pwm_bench.py", "check_boot_led.py", "check_arming_neutral.py", "check_power_sense.py", "check_uart_swap.py", "check_uart_owner.py"):
+        scripts = [
+            "Tools/vgsolar/ncu_client_test.py",
+            "Tools/vgsolar/check_pwm_bench.py",
+            "boards/vg/vgsolar/tests/test_boot_led.py",
+            "Tools/vgsolar/check_arming_neutral.py",
+            "Tools/vgsolar/check_power_sense.py",
+            "Tools/vgsolar/check_uart_swap.py",
+            "Tools/vgsolar/check_uart_owner.py",
+            "Tools/vgsolar/check_dyp_uart_owner.py",
+            "Tools/vgsolar/check_fram_bwrite.py",
+            "src/modules/vgsolar_encoders/test/test_speed_telemetry.py",
+        ]
+        for script in scripts:
             print(f"HOST CHECK: {script}", flush=True)
-            result = subprocess.run([sys.executable, "-B", str(ROOT / "Tools/vgsolar" / script)])
+            result = subprocess.run([sys.executable, "-B", str(ROOT / script)])
             if result.returncode:
                 failures += 1
         print("ALL CHECKS: " + ("passed" if failures == 0 else "failed"), flush=True)

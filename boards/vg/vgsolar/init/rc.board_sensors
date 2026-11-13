@@ -1,6 +1,17 @@
 #!/bin/sh
 # Actual VGSolar hardware from AP hwdef; no V6C revision detection.
 board_adc start
+# Start read-only wheel capture once either side has a saved calibration.
+# This does not enable wheel-speed control or any actuator output.
+if param greater VGS_ENC_R_CPR 0
+then
+    vgsolar_encoders start
+else
+    if param greater VGS_ENC_L_CPR 0
+    then
+        vgsolar_encoders start
+    fi
+fi
 # NCU status and command link; disconnected sensors and actuators remain fail-closed.
 vgsolar_link start
 vgsolar_mode start

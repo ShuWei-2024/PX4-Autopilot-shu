@@ -12,3 +12,11 @@ uint32 left_invalid_transitions
 int8 right_direction				# -1, 0 (no movement in sample), +1 phase order
 int8 left_direction
 bool capture_active				# GPIO edge callbacks are installed
+
+float32 right_speed_m_s			# signed wheel surface speed; NaN if uncalibrated/inactive
+float32 left_speed_m_s			# requires driven-wheel CPR and positive effective radius
+
+float32 right_distance_m                         # signed travel since calibration/start baseline; NaN if invalid
+float32 left_distance_m
+float32 right_path_m                             # total wheel surface travel, forward and reverse both add
+float32 left_path_m

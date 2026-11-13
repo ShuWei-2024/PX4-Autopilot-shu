@@ -80,5 +80,50 @@ int main()
 	const auto first_sample = vgsolar_encoders::calculate_wheel_kinematics(40, 4, 40, 0, false);
 	assert(first_sample.configured && std::isfinite(first_sample.angle_rad) && std::isnan(first_sample.speed_rad_s));
 
-	puts("PASS: quadrature transitions/recovery, 100k signed edges, wheel CPR/direction/speed conversion, and uncalibrated NaN handling");
+	// One driven-wheel revolution per second at the historical initial radius.
+	using vgsolar_encoders::calculate_linear_speed;
+	assert(std::fabs(calculate_linear_speed(wheel.speed_rad_s, 0.0404f, true) - 0.253840686f) < 1e-6f);
+	assert(std::fabs(calculate_linear_speed(reverse.speed_rad_s, 0.0404f, true) + 0.253840686f) < 1e-6f);
+	assert(calculate_linear_speed(0.f, 0.0404f, true) == 0.f);
+	assert(std::isnan(calculate_linear_speed(wheel.speed_rad_s, 0.f, true)));
+	assert(std::isnan(calculate_linear_speed(wheel.speed_rad_s, -1.f, true)));
+	assert(std::isnan(calculate_linear_speed(wheel.speed_rad_s, NAN, true)));
+	assert(std::isnan(calculate_linear_speed(wheel.speed_rad_s, INFINITY, true)));
+	assert(std::isnan(calculate_linear_speed(uncalibrated.speed_rad_s, 0.0404f, true)));
+	assert(std::isnan(calculate_linear_speed(first_sample.speed_rad_s, 0.0404f, true)));
+	assert(std::isnan(calculate_linear_speed(wheel.speed_rad_s, 0.0404f, false)));
+
+	vgsolar_encoders::WheelDistance distance;
+	distance.update(100, 100, 40, 0.0404f, false, true);
+	assert(distance.distance() == 0.f && distance.path() == 0.f);
+	distance.update(140, 140, 40, 0.0404f, false, true);
+	assert(std::fabs(distance.distance() - 0.253840686f) < 1e-6f);
+	distance.update(100, 180, 40, 0.0404f, false, true);
+	assert(std::fabs(distance.distance()) < 1e-6f);
+	assert(std::fabs(distance.path() - 2.f * 0.253840686f) < 1e-6f);
+	// Forward and back within one sample still increase traveled path.
+	distance.update(100, 220, 40, 0.0404f, false, true);
+	assert(std::fabs(distance.path() - 3.f * 0.253840686f) < 1e-6f);
+	distance.update(100, 220, 40, 0.0404f, true, true); // direction change starts a new baseline
+	assert(distance.distance() == 0.f && distance.path() == 0.f);
+	distance.update(140, 260, 40, 0.0404f, true, true);
+	assert(std::fabs(distance.distance() + 0.253840686f) < 1e-6f);
+	assert(std::fabs(distance.path() - 0.253840686f) < 1e-6f);
+	distance.update(140, 260, 0, 0.0404f, true, true);
+	assert(std::isnan(distance.distance()) && std::isnan(distance.path()));
+	distance.update(200, 320, 40, 0.0404f, false, true); // uncalibrated movement is not backfilled
+	assert(distance.distance() == 0.f && distance.path() == 0.f);
+	distance.update(200, 320, 80, 0.0404f, false, true); // CPR change
+	assert(distance.path() == 0.f);
+	distance.update(200, 320, 80, 0.0808f, false, true); // radius change
+	assert(distance.path() == 0.f);
+	distance.update(200, 320, 80, 0.0808f, false, false);
+	assert(std::isnan(distance.path()));
+	distance.update(200, UINT32_MAX - 1, 40, 0.0404f, false, true);
+	distance.update(204, 2, 40, 0.0404f, false, true); // uint32 transition rollover
+	assert(std::fabs(distance.path() - 0.0253840686f) < 1e-6f);
+	distance.update(204, 2, 40, NAN, false, true);
+	assert(std::isnan(distance.path()));
+
+	puts("PASS: quadrature transitions/recovery, 100k signed edges, wheel CPR/direction/speed conversion, NaN handling, signed travel/path, reversal, calibration reset, and rollover");
 }

@@ -56,6 +56,8 @@ public:
 				 i == 0 ? "left" : "right", c.port, c.device_id, i == 0 ? 7u : 1u, c.latest_mm.load());
 			PX4_INFO("frames=%" PRIu32 " checksum=%" PRIu32 " partial_timeout=%" PRIu32 " io_errors=%" PRIu32,
 				 c.frames.load(), c.checksum.load(), c.partial_timeout.load(), c.io_errors.load());
+			PX4_INFO("uart_open=%u rx_bytes=%" PRIu32 " last_errno=%d", (unsigned)c.uart_open.load(),
+				 c.rx_bytes.load(), c.last_error.load());
 		}
 
 		PX4_INFO("9600 8N1; latest_mm=4294967295 means invalid/stale; timeout=500 ms");
@@ -75,10 +77,14 @@ private:
 		// status与工作项可能分别读取和更新这些字段，因此使用原子变量。
 		// latest_mm=UINT32_MAX只用于诊断，表示当前距离无效或过期。
 		px4::atomic<uint32_t> frames{0}, checksum{0}, partial_timeout{0}, io_errors{0}, latest_mm{UINT32_MAX};
+		px4::atomic<uint32_t> rx_bytes{0};
+		px4::atomic<int> last_error{0};
+		px4::atomic<bool> uart_open{false};
+		hrt_abstime next_open_attempt{0};
 	};
 	Channel _channels[2];
-	// 配置单路串口和消息元数据；此处成功只表示端口可用，不表示传感器已收数。
-	bool open_channel(unsigned index, const char *port)
+	// 只保存端口路径和消息元数据，不在 CLI 任务组打开 UART。
+	bool configure_channel(unsigned index, const char *port)
 	{
 		// 仅接受能映射到DeviceId串口总线号的路径，并防止路径缓冲区溢出。
 		if (!port || strncmp(port, "/dev/ttyS", 9) != 0 || strlen(port) >= sizeof(_channels[index].port)) { return false; }
@@ -90,6 +96,26 @@ private:
 
 		auto &c = _channels[index];
 		strncpy(c.port, port, sizeof(c.port) - 1);
+		// DeviceId从零初始化，避免未使用的地址位带入随机值。
+		device::Device::DeviceId id{};
+		id.devid_s.bus_type = device::Device::DeviceBusType_SERIAL;
+		id.devid_s.bus = bus;
+		id.devid_s.devtype = DRV_DIST_DEVTYPE_DYP_A02;
+		c.device_id = id.devid;
+		c.rangefinder.set_device_id(id.devid);
+		// 方向标签和量程沿用APM板级配置，实际安装和精度仍需实板核对。
+		c.rangefinder.set_orientation(index == 0 ? 7 : 1);
+		c.rangefinder.set_rangefinder_type(distance_sensor_s::MAV_DISTANCE_SENSOR_ULTRASOUND);
+		c.rangefinder.set_min_distance(0.03f);
+		c.rangefinder.set_max_distance(4.5f);
+		c.rangefinder.set_mode(distance_sensor_s::MODE_ENABLED);
+		return true;
+	}
+
+	// Open/configure/read/close in the same NuttX work-queue task group.
+	bool open_uart(Channel &c)
+	{
+		const char *port = c.port;
 		// 无数据时read立即返回，避免一个传感器断线拖住另一通道。
 		c.fd = ::open(port, O_RDWR | O_NOCTTY | O_NONBLOCK);
 
@@ -112,20 +138,18 @@ private:
 		if (cfsetispeed(&config, B9600) != 0 || cfsetospeed(&config, B9600) != 0
 		    || tcsetattr(c.fd, TCSANOW, &config) != 0 || tcflush(c.fd, TCIFLUSH) != 0) { return false; }
 
-		// DeviceId从零初始化，避免未使用的地址位带入随机值。
-		device::Device::DeviceId id{};
-		id.devid_s.bus_type = device::Device::DeviceBusType_SERIAL;
-		id.devid_s.bus = bus;
-		id.devid_s.devtype = DRV_DIST_DEVTYPE_DYP_A02;
-		c.device_id = id.devid;
-		c.rangefinder.set_device_id(id.devid);
-		// 方向标签和量程沿用APM板级配置，实际安装和精度仍需实板核对。
-		c.rangefinder.set_orientation(index == 0 ? 7 : 1);
-		c.rangefinder.set_rangefinder_type(distance_sensor_s::MAV_DISTANCE_SENSOR_ULTRASOUND);
-		c.rangefinder.set_min_distance(0.03f);
-		c.rangefinder.set_max_distance(4.5f);
-		c.rangefinder.set_mode(distance_sensor_s::MODE_ENABLED);
+		c.uart_open.store(true);
 		return true;
+	}
+
+	void close_uart(Channel &c)
+	{
+		if (c.fd >= 0) {
+			::close(c.fd);
+			c.fd = -1;
+		}
+
+		c.uart_open.store(false);
 	}
 
 	void Run() override
@@ -133,6 +157,7 @@ private:
 		if (should_exit()) {
 			// 先撤销两路有效读数，再停止调度并让ModuleBase清理对象。
 			for (auto &c : _channels) {
+				close_uart(c);
 				c.rangefinder.set_mode(distance_sensor_s::MODE_DISABLED);
 				c.rangefinder.update(hrt_absolute_time(), 0.f, 0);
 			}
@@ -145,13 +170,32 @@ private:
 		for (auto &c : _channels) {
 			uint8_t buffer[128];
 			// 每路每轮最多128字节，噪声流也不能无限占用当前工作队列。
-			const ssize_t count = ::read(c.fd, buffer, sizeof(buffer));
+			const hrt_abstime before_read = hrt_absolute_time();
+
+			if (c.fd < 0 && before_read >= c.next_open_attempt) {
+				c.next_open_attempt = before_read + 1000000;
+
+				if (!open_uart(c)) {
+					c.last_error.store(errno);
+					c.io_errors.fetch_add(1);
+					close_uart(c);
+				}
+			}
+
+			const ssize_t count = c.fd >= 0 ? ::read(c.fd, buffer, sizeof(buffer)) : 0;
+			const int read_error = count < 0 ? errno : 0;
 			const hrt_abstime now = hrt_absolute_time(); // 本批字节的主机接收处理时间。
 			bool frame_received = false;
 
 			// 非阻塞端口暂时无数据或被信号中断属于正常情况，其他读错误计数。
-			if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+			if (count < 0 && read_error != EAGAIN && read_error != EWOULDBLOCK && read_error != EINTR) {
 				c.io_errors.fetch_add(1);
+				c.last_error.store(read_error);
+			}
+
+			if (count > 0) {
+				c.rx_bytes.fetch_add(static_cast<uint32_t>(count));
+				c.last_error.store(0);
 			}
 
 			// 解包可跨调度周期；同一批中有多个完整帧时，最终保留最后一帧。
@@ -204,13 +248,13 @@ int DypA02::task_spawn(int argc, char *argv[])
 
 	if (!instance) { return PX4_ERROR; }
 
-	// 任一路初始化失败则整体启动失败；析构函数负责回收已成功打开的另一路。
-	if (!instance->open_channel(0, left) || !instance->open_channel(1, right)) {
+	// 任一路路径配置无效则拒绝启动；实际打开和错误诊断由工作队列完成。
+	if (!instance->configure_channel(0, left) || !instance->configure_channel(1, right)) {
 		delete instance;
 		return PX4_ERROR;
 	}
 
-	// 两口都准备好后再注册模块对象，并请求每10ms检查一次串口。
+	// 这里只保存两口配置；UART 在 Run 工作队列任务组内打开，每10ms检查一次。
 	// 此周期是软件检查周期，不是传感器测距频率或硬实时保证。
 	_object.store(instance);
 	_task_id = task_id_is_work_queue;

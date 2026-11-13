@@ -1,39 +1,37 @@
 # VGSolar 开发、测试与通信工具
 
-更新日期：2026-11-09。适用 `feat/v1.17_VGSolar`，本次核对代码基线 `6031d90087`；以下为当前检查入口，本次文档更新未重跑固件回归。
+更新：2026-11-13，适用 `v1.17.0_vgsolar`。
 
-## 构建与完整离线验证（WSL/Linux）
+## 构建和离线回归
 
-在PX4仓库根目录执行：
+先按主仓库gitlink初始化NuttX等子模块，再在已配置工具链的Linux/WSL根目录执行：
 
 ```sh
+git submodule sync -- platforms/nuttx/NuttX/nuttx
+git submodule update --init --recursive
 make -j4 vg_vgsolar_default
 python3 -B Tools/vgsolar/run_offline_tests.py --sanitize --all
 ```
 
-`--all` 包含12组C++回归（含生产模式主机测试）、9项NCU客户端测试和 PWM、启动 LED、解锁输出连续性、供电能力、串口 SWAP/任务组生命周期检查。模式测试需要先构建以生成uORB消息头；仅跑11组纯逻辑／协议测试可省略`--all`。主机需要g++、Python3、bash；离线测试本身不需要pyserial、串口或硬件。临时测试二进制在系统临时目录退出后清理，不写入固件源码树。
+`--all`包含12组C++（含生产模式主机测试）、9项NCU客户端测试以及PWM/双灯/解锁中位/电源/串口/FRAM/遥测检查。仅跑11组纯逻辑协议测试可省略`--all`；生产模式测试需要已生成的uORB头。临时二进制由系统临时目录自动清理，不提交到Git。
 
-## 文件用途
+## 保留的检查入口
 
-| 文件 | 用途 |
-|---|---|
-| ncu_client.py | RK3588／PC NCU客户端，默认只打印命令，monitor只读，--send明确发送 |
-| requirements-rk3588.txt | 实际串口使用所需pyserial依赖 |
-| ncu_client_test.py | 协议布局、边界、解析、写入、退出停车、Linux虚拟串口验证 |
-| check_boot_led.py | 生产LED后端定时、极性、完成取消及启动顺序检查 |
-| check_pwm_bench.py | 五路引脚／定时器、HRT隔离、禁用默认值、NSH设置／停止脚本回归 |
-| check_arming_neutral.py | 双向电机解锁中位及预解锁舵机输出连续性 |
-| check_power_sense.py | 有/无 5V 采样能力时的生产供电预检路径 |
-| check_uart_swap.py | USART3 SWAP 参数与配置检查 |
-| check_uart_owner.py | 生产串口在工作队列任务组内打开、使用与关闭的生命周期 |
-| run_offline_tests.py | 固件纯逻辑／生产模式主机测试及完整测试统一入口 |
+- `run_offline_tests.py`：统一入口，新增检查均已接入`--all`。
+- `ncu_client.py`、`ncu_client_test.py`：PC/RK3588协议客户端及布局/解析/退出停车/虚拟串口回归；真实串口依赖见requirements-rk3588.txt。
+- `check_pwm_bench.py`：五路资源、编码器排除、HRT、默认禁用及台架脚本。
+- `boards/vg/vgsolar/tests/test_boot_led.py`：当前双灯/失败锁存/启动钩子和生产C++前台等待。移除过时重复的`check_boot_led.py`。
+- `check_arming_neutral.py`：双向中位、预解锁到解锁连续性及普通电机渐变。
+- `check_power_sense.py`：有/无5V采样能力时的生产供电预检。
+- `check_uart_swap.py`、`check_uart_owner.py`：NCU SWAP和工作队列UART生命周期。
+- `check_dyp_uart_owner.py`：生产DYP spawn/Run的任务组归属、有效帧、停启及单侧打开失败恢复。
+- `check_fram_bwrite.py`：生产FRAM普通/chunked多页源缓冲前移、内容、边界及出错解锁。
+- `src/modules/vgsolar_encoders/test/test_speed_telemetry.py`：生产NAMED_VALUE_FLOAT的速度/米数、左右均值、NaN/过期及压力/调试共存。
 
-[客户端命令说明](README_ncu_client.md)；[软件行为与参数](../../docs/vgsolar/software_parity.md)；[核心板启动与后续验收](../../docs/vgsolar/hardware_bringup.md)。
+新增后三项覆盖本轮实际故障或遥测接口，属于有用回归。临时修改脚本、打包脚本、试验快照/日志不加入源码仓库；测试fixture保留在有明确入口的测试目录。构建产物和逐机校准不提交。
 
-## 清理原则
+## 结果范围
 
-旧只读NCU脚本和重复测试已被新客户端覆盖，因此移除。吸盘／导航／安全门控／协议测试及host替身有实际回归用途，保留且不链接进固件。Python缓存和临时输出不提交；构建和固件交付文件保存在既有build目录／外部outputs，不加入Git。
+上传前完整离线回归通过；固件编译另行记录。UART任务组、GPIO/HRT、SPI页写及虚拟串口均采用宿主替身，不能代替现场电平、PWM波形、传感器精度、真实RK3588长时链路和整车验收。
 
-虚拟串口另一端是测试应答器，生产模式主机测试替换了调度与物理接口。两者都不等于实际RK3588到飞控的完整链路、SITL/HIL或整车测试。
-
-双向PWM解锁中位回归：`python3 -B Tools/vgsolar/check_arming_neutral.py`，已纳入 `--all`；使用生产限幅状态机与宿主时钟/PWM映射替身，不代表实物波形验收。
+[实机结果与接续](../../docs/vgsolar/validation_20261113.md) · [参数存储/子模块](../../docs/vgsolar/parameter_storage.md) · [NCU客户端](README_ncu_client.md)。

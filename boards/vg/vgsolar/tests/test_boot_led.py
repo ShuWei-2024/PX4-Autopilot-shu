@@ -105,3 +105,35 @@ for var in ('STORAGE_AVAILABLE', 'VEHICLE_TYPE'):
 header = (ROOT / 'boards/vg/vgsolar/src/board_config.h').read_text()
 assert '#define BOARD_OVERLOAD_LED ' not in header
 print('PASS completion hook ordering, preserved inputs, exclusive red LED ownership')
+
+# Retain the production C++ foreground-wait lifetime regression.
+command = (ROOT/'src/systemcmds/led_control/led_control.cpp').read_text()
+start = command.index('static void vgsolar_wait_for_reboot()')
+end = command.index('\n#endif', start)
+helper = command[start:end]
+# Compile the actual production C++ wait loop. A host sleep stub interrupts
+# the first sleep so the test verifies blocking without entering an endless loop.
+with tempfile.TemporaryDirectory(prefix='vgsolar-startup-guard-') as folder:
+    folder = Path(folder)
+    harness = r'''#include <cassert>
+struct SleepReached {};
+static int log_calls;
+#define PX4_INFO(...) (++log_calls)
+static int usleep(unsigned int duration) {
+ assert(duration == 1000000); throw SleepReached{};
+}
+''' + helper + r'''
+int main() {
+ bool sleeping = false;
+ try { vgsolar_wait_for_reboot(); } catch (const SleepReached &) { sleeping = true; }
+ assert(sleeping && log_calls == 1);
+ return 0;
+}
+'''
+    (folder/'guard.cpp').write_text(harness)
+    subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',
+                    str(folder/'guard.cpp'),'-o',str(folder/'guard')],check=True)
+    subprocess.run([str(folder/'guard')],check=True)
+assert 'vgsolar_boot_led_complete();' in command
+assert 'strcmp(argv[1], "boot_complete_wait") == 0' in command
+print('PASS: production C++ startup guard emits entry marker and sleeps; board hook selects foreground wait')

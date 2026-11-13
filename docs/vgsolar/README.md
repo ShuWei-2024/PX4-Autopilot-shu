@@ -1,6 +1,6 @@
 # VGSolar PX4 功能迁移：当前状态与阅读目录
 
-更新日期：2026-11-09。当前分支 `feat/v1.17_VGSolar`，文档核对代码基线 `6031d90087`。本分支来自 `feat/vgsolar-px4-migration`；早期迁移起点为 `1501409c6c`，不是另一条 Rover/Copter 硬件基线分支的配置。
+更新日期：2026-11-13。适用分支 `v1.17.0_vgsolar`，本轮从 `b884b72c72` 继续开发。11月13日实测、逐机参数及下一步见 [阶段验收记录](validation_20261113.md)。早期迁移分支和提交仅作为历史来源。
 
 APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1376982babc988c`。早期任务书位于 Windows `E:/shuwei/px4/outputs/VGSolar_APM到PX4功能迁移计划.md`，该本地路径不随仓库发布。
 
@@ -10,7 +10,7 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 - 底盘：五路原生 PWM、差速 Rover、可选轮速反馈、安全及业务模式输出门控。
 - 通信：NCU 状态回传及速度/转弯/导航/系统/参数命令处理；USART3 SWAP、寄存器只读诊断与工作队列内打开/关闭串口。2BLD6010 为 RS485 只读遥测。
 - 业务：VGSolar 动态模式、清洁机构状态机、急停/待释放处理、掉压告警、转弯及点到点导航。
-- 诊断：压力遥测、项目电量换算、ULog 链路/事件日志、启动蓝灯，以及启动任务生命周期、解锁 PWM 瞬态和无 5V 监测能力的适配。
+- 诊断：压力遥测、项目电量换算、ULog 链路/事件日志、双灯启动检查、编码器速度/米数，以及启动任务生命周期、解锁 PWM 瞬态和无 5V 监测能力的适配。
 
 软件行为、参数和实现边界见 [software_parity.md](software_parity.md) 及 [模式说明](../../src/modules/vgsolar_mode/README.md)。软件路径已实现不等于完整 APM 动态行为或整车验收。
 
@@ -18,7 +18,7 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 
 板级脚本自动启动 `vgsolar_link` 和 `vgsolar_mode`。模式号动态分配，不固定为 APM 的 17；任务运行不等于已经进入该模式。
 
-`VGS_ENABLE`、`VGS_CLN_EN`、`VGS_RNG_EN`、`VGS_IN_EN`、`VGS_SAFE_EN`、`VGS_ESC_EN` 默认 0；编码器手动启动，CPR 默认 0，轮速闭环另行使能。五路 PWM 功能默认 0，DShot/PX4IO 未启用。已保存参数不受 `set-default` 覆盖，当前实物状态以回读为准。
+`VGS_ENABLE`、`VGS_CLN_EN`、`VGS_RNG_EN`、`VGS_IN_EN`、`VGS_SAFE_EN`、`VGS_ESC_EN` 默认 0；任意一侧保存CPR大于0时编码器自动启动；CPR默认0，轮速闭环另行使能。五路 PWM 功能默认 0，DShot/PX4IO 未启用。已保存参数不受 `set-default` 覆盖，当前实物状态以回读为准。
 
 ## 推荐阅读顺序
 
@@ -26,7 +26,8 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 2. [现状与实机验收清单](../../boards/vg/vgsolar/PORTING.md)：已实现内容、已有证据、待验项目。
 3. [软件行为与参数](software_parity.md)：APM 对应关系、机构释放、电量和导航行为。
 4. [工具与测试](../../Tools/vgsolar/README.md)、[NCU 客户端](../../Tools/vgsolar/README_ncu_client.md)：离线入口和当前双向串口联调方法。
-5. [核心板启动及近期修复](hardware_bringup.md)、[启动蓝灯](startup_led.md)、[阀泵测试](VALVE_PUMP_BENCH.md)：按具体问题查阅。
+5. [11月13日实测与下一步](validation_20261113.md)、[参数存储](parameter_storage.md)、[编码器速度/米数](ENCODER_QGC_SPEED.md)、[双超声波诊断](DYP_UART_DIAGNOSTICS.md)。
+6. [核心板启动及近期修复](hardware_bringup.md)、[启动蓝灯](startup_led.md)、[阀泵测试](VALVE_PUMP_BENCH.md)：按具体问题查阅。
 
 ## 早期实现过程
 
@@ -42,6 +43,6 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 
 ## 已有证据与下一步
 
-已有早期板载启动/姿态/SD 记录、部分 PWM 反馈和 PC0 电压模拟/QGC 显示记录。真实压力精度、IR、编码器、RK3588 稳定通信、完整输出波形、机构负载及整车循环仍需逐项补证。11 月 6 日的软件修复与现场现象见启动记录。
+11月13日已观察到：编码器两路原始计数及QGC速度/米数字段、双超声波连续有效帧和自启动、V6配置下参数保存/完整回读及重上电标定保持、上锁模式切入/退出、右行走1500μs驱动回读。详见 [本轮记录](validation_20261113.md)，其中逐机值不改变固件默认值。
 
-侧向姿态、校准与持续航向尚未完成验收；后续独立输入和通信开发不代表依赖航向的自动任务已放行。本次仅更新文档，未增加实机证据。
+当前停止在右侧带电中位测试之前。动力停止/点动、控制器整定、运动中联锁、实际距离精度、动态航向/定位及整车负载循环仍待验收。电压按用户已标定处理，电流后续再测。

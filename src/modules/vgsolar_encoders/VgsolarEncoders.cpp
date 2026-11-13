@@ -75,6 +75,10 @@ public:
 			 data.left_count, data.left_delta, data.left_direction, data.left_invalid_transitions);
 		PX4_INFO("CPR right=%ld left=%ld; reverse right=%ld left=%ld", (long)_param_right_cpr.get(),
 			 (long)_param_left_cpr.get(), (long)_param_right_reverse.get(), (long)_param_left_reverse.get());
+		PX4_INFO("linear speed m/s: right=%.4f left=%.4f; radius=%.4f m",
+			 (double)data.right_speed_m_s, (double)data.left_speed_m_s, (double)_param_wheel_radius.get());
+		PX4_INFO("travel m: right=%.4f left=%.4f; path m: right=%.4f left=%.4f",
+			 (double)data.right_distance_m, (double)data.left_distance_m, (double)data.right_path_m, (double)data.left_path_m);
 		PX4_INFO("wheel_encoders is NaN for any side whose CPR is zero; counts remain phase-order diagnostics");
 		return 0;
 	}
@@ -223,8 +227,8 @@ private:
 		report.right_direction = report.right_delta > 0 ? 1 : (report.right_delta < 0 ? -1 : 0);
 		report.left_direction = report.left_delta > 0 ? 1 : (report.left_delta < 0 ? -1 : 0);
 		report.capture_active = active;
-		_encoder_pub.publish(report);
 		publish_wheel_encoders(report);
+		_encoder_pub.publish(report);
 		_previous_right_count = report.right_count;
 		_previous_left_count = report.left_count;
 		return report;
@@ -235,7 +239,7 @@ private:
 		updateParams();
 	}
 
-	void publish_wheel_encoders(const vgsolar_encoder_status_s &report)
+	void publish_wheel_encoders(vgsolar_encoder_status_s &report)
 	{
 		const uint64_t interval_us = _last_kinematics_timestamp > 0 && report.timestamp > _last_kinematics_timestamp ?
 					     report.timestamp - _last_kinematics_timestamp : 0;
@@ -243,6 +247,18 @@ private:
 				_param_right_cpr.get(), interval_us, _param_right_reverse.get() != 0);
 		const auto left = vgsolar_encoders::calculate_wheel_kinematics(report.left_count, report.left_delta,
 				_param_left_cpr.get(), interval_us, _param_left_reverse.get() != 0);
+		report.right_speed_m_s = vgsolar_encoders::calculate_linear_speed(right.speed_rad_s,
+				_param_wheel_radius.get(), report.capture_active);
+		report.left_speed_m_s = vgsolar_encoders::calculate_linear_speed(left.speed_rad_s,
+				_param_wheel_radius.get(), report.capture_active);
+		_right_distance.update(report.right_count, report.right_transitions, _param_right_cpr.get(),
+				_param_wheel_radius.get(), _param_right_reverse.get() != 0, report.capture_active);
+		_left_distance.update(report.left_count, report.left_transitions, _param_left_cpr.get(),
+				_param_wheel_radius.get(), _param_left_reverse.get() != 0, report.capture_active);
+		report.right_distance_m = _right_distance.distance();
+		report.left_distance_m = _left_distance.distance();
+		report.right_path_m = _right_distance.path();
+		report.left_path_m = _left_distance.path();
 		wheel_encoders_s wheel{};
 		wheel.timestamp = report.timestamp;
 		wheel.wheel_angle[0] = right.angle_rad;
@@ -264,7 +280,18 @@ private:
 		debug.data[1] = static_cast<float>(report.left_count);
 		debug.data[2] = static_cast<float>(static_cast<uint64_t>(report.right_invalid_transitions) + report.left_invalid_transitions);
 		debug.data[3] = report.capture_active ? 1.f : 0.f;
-		_debug_pub.publish(debug); // 0=右计数，1=左计数，2=无效跳变总数，3=采集活动标志。
+		debug.data[4] = report.right_speed_m_s;
+		debug.data[5] = report.left_speed_m_s;
+		const bool valid = PX4_ISFINITE(report.right_speed_m_s) && PX4_ISFINITE(report.left_speed_m_s);
+		debug.data[6] = valid ? 0.5f * (report.right_speed_m_s + report.left_speed_m_s) : NAN;
+		debug.data[7] = valid ? 1.f : 0.f;
+		debug.data[8] = report.right_distance_m;
+		debug.data[9] = report.left_distance_m;
+		debug.data[10] = 0.5f * (report.right_distance_m + report.left_distance_m);
+		debug.data[11] = report.right_path_m;
+		debug.data[12] = report.left_path_m;
+		debug.data[13] = 0.5f * (report.right_path_m + report.left_path_m);
+		_debug_pub.publish(debug); // 0..3 retain raw diagnostics; 4=right m/s, 5=left m/s, 6=mean m/s, 7=valid.
 	}
 
 	uORB::Publication<vgsolar_encoder_status_s> _encoder_pub{ORB_ID(vgsolar_encoder_status)};
@@ -273,6 +300,8 @@ private:
 	uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)};
 	vgsolar_encoders::QuadratureDecoder _right;
 	vgsolar_encoders::QuadratureDecoder _left;
+	vgsolar_encoders::WheelDistance _right_distance;
+	vgsolar_encoders::WheelDistance _left_distance;
 	PinContext _contexts[4]{};
 	uint64_t _right_last_edge{0};
 	uint64_t _left_last_edge{0};
@@ -286,7 +315,8 @@ private:
 		(ParamInt<px4::params::VGS_ENC_R_CPR>) _param_right_cpr,
 		(ParamInt<px4::params::VGS_ENC_L_CPR>) _param_left_cpr,
 		(ParamInt<px4::params::VGS_ENC_R_REV>) _param_right_reverse,
-		(ParamInt<px4::params::VGS_ENC_L_REV>) _param_left_reverse
+		(ParamInt<px4::params::VGS_ENC_L_REV>) _param_left_reverse,
+		(ParamFloat<px4::params::VGS_WHL_RAD>) _param_wheel_radius
 	)
 };
 
