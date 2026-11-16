@@ -16,16 +16,28 @@ static bool wheel_active = true;
 static float attitude_roll = 0.f;
 static bool range_messages = false;
 static vgsolar_safety_status_s safety{};
+static estimator_status_flags_s yaw_flags{};
+static bool slow_yaw_flags = false;
+static uint64_t last_yaw_flags_publish = 0;
 static void health(bool armed = true)
 {
 	vehicle_status_s vehicle{};
 	vehicle.timestamp = host::now; vehicle.nav_state = mode_id;
+	vehicle.vehicle_type = vehicle_status_s::VEHICLE_TYPE_ROVER;
 	vehicle.arming_state = armed ? vehicle_status_s::ARMING_STATE_ARMED : vehicle_status_s::ARMING_STATE_DISARMED;
 	host::publish("vehicle_status", vehicle);
 	actuator_armed_s arm{}; arm.timestamp = host::now; arm.armed = armed;
 	host::publish("actuator_armed", arm);
 	local.timestamp = host::now;
 	host::publish("vehicle_local_position", local);
+	if (!slow_yaw_flags || host::now - last_yaw_flags_publish >= 1000000) {
+		yaw_flags.timestamp = host::now;
+		host::publish("estimator_status_flags", yaw_flags);
+		last_yaw_flags_publish = host::now;
+	}
+	estimator_selector_status_s selector{};
+	selector.timestamp = host::now; selector.primary_instance = 0;
+	host::publish("estimator_selector_status", selector);
 	vehicle_attitude_s attitude{}; attitude.timestamp = host::now;
 	matrix::Quatf{matrix::Eulerf{attitude_roll, 0.f, local.heading}}.copyTo(attitude.q);
 	host::publish("vehicle_attitude", attitude);
@@ -92,6 +104,56 @@ int main()
 	reply.request_id = request.request_id; reply.success = true; reply.mode_id = mode_id; reply.arming_check_id = 1;
 	host::publish("register_ext_component_reply", reply);
 	step(mode); assert(status().active && status().state == 0 && !status().motion_allowed);
+
+	// Rover magnetic yaw may be aligned on the ground without in-flight alignment.
+	local.heading_good_for_control = false;
+	yaw_flags.cs_yaw_align = yaw_flags.cs_mag_hdg = true;
+	yaw_flags.cs_mag_aligned_in_flight = false;
+	health(); // EKF publishes changes immediately, then unchanged flags at 1 Hz.
+	slow_yaw_flags = true;
+	send(turn()); step(mode);
+	assert(status().state == 3 && status().turn_phase == 2);
+	for (int i = 0; i < 200 && status().turn_phase != 4; ++i) { step(mode); }
+	assert(status().turn_phase == 4);
+	for (int i = 0; i < 75; ++i) { step(mode); assert(status().turn_phase == 4); }
+	slow_yaw_flags = false;
+	step(mode, false); step(mode); // Abort/rearm must not replay the turn.
+	for (int i = 0; i < 150 && !mode._suction.raised(); ++i) { step(mode); }
+	assert(mode._suction.raised());
+	assert(status().state == 0);
+	for (int fault = 0; fault < 3; ++fault) {
+		yaw_flags.cs_yaw_align = fault != 0;
+		yaw_flags.cs_mag_fault = fault == 1;
+		yaw_flags.cs_mag_field_disturbed = fault == 2;
+		send(turn()); step(mode);
+		assert(status().state == 0 && !status().motion_allowed);
+		assert(host::latest<vgsolar_event_s>("vgsolar_event").reason == 9);
+	}
+	yaw_flags.cs_yaw_align = true; yaw_flags.cs_mag_fault = yaw_flags.cs_mag_field_disturbed = false;
+	health();
+	assert(mode.turn_heading_valid(host::now, local));
+	auto stale_yaw = yaw_flags; stale_yaw.timestamp = host::now - 930000;
+	host::publish("estimator_status_flags", stale_yaw);
+	assert(mode.turn_heading_valid(host::now, local)); // Healthy 1 Hz sample observed on the real board.
+	stale_yaw.timestamp = host::now - 2000001;
+	host::publish("estimator_status_flags", stale_yaw);
+	assert(!mode.turn_heading_valid(host::now, local));
+	health();
+	auto invalid_local = local; invalid_local.heading = NAN;
+	assert(!mode.turn_heading_valid(host::now, invalid_local));
+	invalid_local = local; invalid_local.timestamp = host::now - 500001;
+	assert(!mode.turn_heading_valid(host::now, invalid_local));
+	estimator_selector_status_s other_selector{};
+	other_selector.timestamp = host::now; other_selector.primary_instance = 1;
+	host::publish("estimator_selector_status", other_selector);
+	assert(!mode.turn_heading_valid(host::now, local)); // Never reuse healthy instance 0 for selected instance 1.
+	health();
+	vehicle_status_s aircraft = host::latest<vehicle_status_s>("vehicle_status");
+	aircraft.vehicle_type = vehicle_status_s::VEHICLE_TYPE_ROTARY_WING;
+	host::publish("vehicle_status", aircraft);
+	assert(!mode.turn_heading_valid(host::now, local));
+	local.heading_good_for_control = true;
+	health();
 
 	// An unimplemented system command must not turn off the speed watchdog.
 	send(speed()); step(mode); assert(status().state == 2 && status().motion_allowed);

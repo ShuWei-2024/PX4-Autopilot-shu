@@ -105,7 +105,10 @@ private:
 class Subscription {
 public:
 	explicit Subscription(const orb_metadata *meta) : _name(meta->name) {}
+	uint8_t get_instance() const { return _instance; }
+	bool ChangeInstance(uint8_t instance) { _instance = instance; _cursor = 0; return true; }
 	template<typename T> bool copy(T *value) {
+		if (_instance != 0) { return false; } // No secondary estimator sample in this host model.
 		auto &queue = host::topics[_name];
 		if (queue.empty()) { return false; }
 		if (queue.back().size() != sizeof(T)) { return false; }
@@ -119,6 +122,7 @@ public:
 private:
 	const char *_name;
 	size_t _cursor{0};
+	uint8_t _instance{0};
 };
 template<typename T> class SubscriptionData : public Subscription {
 public:

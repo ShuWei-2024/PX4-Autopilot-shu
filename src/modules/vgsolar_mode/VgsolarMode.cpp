@@ -39,6 +39,8 @@
 #include <matrix/matrix/math.hpp>
 #include <uORB/topics/vgsolar_safety_status.h>
 #include <uORB/topics/vehicle_attitude.h>
+#include <uORB/topics/estimator_status_flags.h>
+#include <uORB/topics/estimator_selector_status.h>
 #include <mathlib/mathlib.h>
 #include <cstring>
 
@@ -71,6 +73,7 @@ public:
 	{
 		PX4_INFO("registered=%u nav_state=%u rejected=%u", (unsigned)(_mode_id >= 0), (unsigned)_mode_id,
 			 static_cast<unsigned>(_rejected_commands));
+		PX4_INFO("turn_heading=rover_mag_v8 flags_timeout=2000ms");
 		return 0;
 	}
 
@@ -249,6 +252,35 @@ private:
 		       && local.v_xy_valid && PX4_ISFINITE(local.vx) && PX4_ISFINITE(local.vy) && PX4_ISFINITE(motion_speed);
 	}
 
+	bool turn_heading_valid(uint64_t now, const vehicle_local_position_s &local)
+	{
+		if (local.timestamp == 0 || local.timestamp > now || now - local.timestamp > 500000
+		    || !PX4_ISFINITE(local.heading)) { return false; }
+		if (local.heading_good_for_control) { return true; }
+
+		// EKF's final magnetic alignment is an in-flight criterion. Ground rovers
+		// may use aligned, healthy magnetic yaw without climbing above the ground.
+		vehicle_status_s vehicle{};
+		if (!_vehicle_status_sub.copy(&vehicle) || vehicle.vehicle_type != vehicle_status_s::VEHICLE_TYPE_ROVER) {
+			return false;
+		}
+		uint8_t instance = 0;
+		estimator_selector_status_s selector{};
+		if (_estimator_selector_sub.copy(&selector)) {
+			if (selector.timestamp == 0 || selector.timestamp > now || now - selector.timestamp > 2000000) { return false; }
+			instance = selector.primary_instance;
+		} else if (integer("SENS_IMU_MODE", 1) == 0) {
+			return false; // Multi-EKF must identify the selected estimator.
+		}
+		if (_estimator_flags_sub.get_instance() != instance && !_estimator_flags_sub.ChangeInstance(instance)) { return false; }
+		estimator_status_flags_s flags{};
+		return _estimator_flags_sub.copy(&flags) && flags.timestamp > 0 && flags.timestamp <= now
+		       // EKF2 publishes unchanged status flags at ~1 Hz (changes immediately).
+		       && now - flags.timestamp <= 2000000 && flags.cs_yaw_align
+		       && (flags.cs_mag_hdg || flags.cs_mag_3d)
+		       && !flags.cs_mag_fault && !flags.cs_mag_field_disturbed;
+	}
+
 	void observe_navigation_frame(uint64_t now)
 	{
 		vehicle_local_position_s local{};
@@ -311,8 +343,12 @@ private:
   const auto state = _logic.state();
   process_command_impl(command, armed);
   const bool accepted = before == _rejected_commands;
-  const uint8_t reason = accepted ? 0 : !armed ? 1 : state == vgsolar_mode::State::Estop ? 2
+  uint8_t reason = accepted ? 0 : !armed ? 1 : state == vgsolar_mode::State::Estop ? 2
     : !_suction.raised() ? 3 : _safety_hold ? 4 : state == vgsolar_mode::State::Navigation ? 5 : 6;
+  if (!accepted && reason == 6 && command.command == vgsolar_command_s::CMD_TURN) {
+   vehicle_local_position_s local{};
+   if (!_local_position_sub.copy(&local) || !turn_heading_valid(hrt_absolute_time(), local)) { reason = 9; }
+  }
   event(1, command, accepted, reason);
  }
  void process_command_impl(const vgsolar_command_s &command, bool armed)
@@ -470,8 +506,7 @@ private:
 			vehicle_local_position_s local{};
 			if (!armed || !_enabled || !_cleaner_enabled || _safety_hold || !_suction.raised()
 			    || !valid_turn(command.turn_mode, command.turn_direction, command.turn_angle_cd, command.turn_rate_cds)
-			    || !_local_position_sub.copy(&local) || local.timestamp == 0 || now < local.timestamp
-			    || now - local.timestamp > 500000 || !local.heading_good_for_control || !PX4_ISFINITE(local.heading)
+			    || !_local_position_sub.copy(&local) || !turn_heading_valid(now, local)
 			    || (_suction.config().use_ir && !fresh_inputs(now, true))
 			    || (_suction.config().use_pressure && !fresh_inputs(now, false))
 			    || !_logic.command(Command::Turn, true).accepted) {
@@ -657,7 +692,7 @@ private:
 		float motion_speed = NAN;
 		const bool local_ok = _local_position_sub.copy(&local) && local.timestamp > 0 && now >= local.timestamp
 				      && now - local.timestamp < 500000 && velocity_feedback(now, local, motion_speed)
-				      && local.heading_good_for_control && PX4_ISFINITE(local.heading)
+				      && turn_heading_valid(now, local)
 				      && local.heading_reset_counter == _turn_heading_reset;
 		if (_turn_phase != vgsolar_mode::TurnPhase::RaiseSuction && (!local_ok || (_turn_phase == vgsolar_mode::TurnPhase::Turning && now - _turn_phase_start > static_cast<uint64_t>(_turn_timeout_s * 1000000.f)))) {
 			turn_result(false, !local_ok ? 9 : 8);
@@ -1000,6 +1035,8 @@ private:
 	uORB::SubscriptionData<vgsolar_inputs_s> _inputs_sub{ORB_ID(vgsolar_inputs)};
 	uORB::SubscriptionData<vgsolar_safety_status_s> _safety_sub{ORB_ID(vgsolar_safety_status)};
 	uORB::SubscriptionData<vehicle_attitude_s> _attitude_sub{ORB_ID(vehicle_attitude)};
+	uORB::Subscription _estimator_flags_sub{ORB_ID(estimator_status_flags)};
+	uORB::Subscription _estimator_selector_sub{ORB_ID(estimator_selector_status)};
 	uORB::Publication<actuator_servos_s> _servo_pub{ORB_ID(actuator_servos)};
 	uORB::Publication<vgsolar_safety_request_s> _safety_request_pub{ORB_ID(vgsolar_safety_request)};
 	static constexpr uint64_t REQUEST_ID = 0x5647534f4c4152ULL;

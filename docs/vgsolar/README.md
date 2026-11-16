@@ -1,6 +1,6 @@
 # VGSolar PX4 功能迁移：当前状态与阅读目录
 
-更新日期：2026-11-13。适用分支 `v1.17.0_vgsolar`，本轮从 `b884b72c72` 继续开发。11月13日实测、逐机参数及下一步见 [阶段验收记录](validation_20261113.md)。早期迁移分支和提交仅作为历史来源。
+更新日期：2026-11-16。适用分支 `v1.17.0_vgsolar`。最新实测、逐机参数及下一步见 [11月16日阶段记录](validation_20261116.md)；[11月13日记录](validation_20261113.md)保留历史状态。早期迁移分支和提交仅作为历史来源。
 
 APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1376982babc988c`。早期任务书位于 Windows `E:/shuwei/px4/outputs/VGSolar_APM到PX4功能迁移计划.md`，该本地路径不随仓库发布。
 
@@ -26,7 +26,7 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 2. [现状与实机验收清单](../../boards/vg/vgsolar/PORTING.md)：已实现内容、已有证据、待验项目。
 3. [软件行为与参数](software_parity.md)：APM 对应关系、机构释放、电量和导航行为。
 4. [工具与测试](../../Tools/vgsolar/README.md)、[NCU 客户端](../../Tools/vgsolar/README_ncu_client.md)：离线入口和当前双向串口联调方法。
-5. [11月13日实测与下一步](validation_20261113.md)、[参数存储](parameter_storage.md)、[编码器速度/米数](ENCODER_QGC_SPEED.md)、[双超声波诊断](DYP_UART_DIAGNOSTICS.md)。
+5. [11月16日实测与下一步](validation_20261116.md)、[11月13日历史记录](validation_20261113.md)、[参数存储](parameter_storage.md)、[编码器速度/米数](ENCODER_QGC_SPEED.md)、[双超声波诊断](DYP_UART_DIAGNOSTICS.md)。
 6. [核心板启动及近期修复](hardware_bringup.md)、[启动蓝灯](startup_led.md)、[阀泵测试](VALVE_PUMP_BENCH.md)：按具体问题查阅。
 
 ## 早期实现过程
@@ -43,6 +43,6 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 
 ## 已有证据与下一步
 
-11月13日已观察到：编码器两路原始计数及QGC速度/米数字段、双超声波连续有效帧和自启动、V6配置下参数保存/完整回读及重上电标定保持、上锁模式切入/退出、右行走1500μs驱动回读。详见 [本轮记录](validation_20261113.md)，其中逐机值不改变固件默认值。
+11月16日已验证两侧执行器方向、编码器反馈、架空0.2 m/s连续运行和WSL原生ROS2速度命令链路；吸盘下降、抽气和回收动作已观察。地面磁航向入口修复与回归见 [转弯航向修复](turn_ground_heading_20261116.md)。
 
-当前停止在右侧带电中位测试之前。动力停止/点动、控制器整定、运动中联锁、实际距离精度、动态航向/定位及整车负载循环仍待验收。电压按用户已标定处理，电流后续再测。
+完整吸附转弯尚未通过：出现运行中航向/反馈拒绝和姿态保护中止，最后放平复测缺少对应ULog。下一步定位异步时间戳判断及异常回收路径，保留真实倾角、陈旧数据与真空保护。详见 [最新阶段记录](validation_20261116.md)。地面轨迹、实际距离精度、断链停车、动态航向和整车负载仍待验收；电压保留既有标定，电流尚未标定。
