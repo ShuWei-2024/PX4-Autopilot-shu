@@ -73,7 +73,7 @@ public:
 	{
 		PX4_INFO("registered=%u nav_state=%u rejected=%u", (unsigned)(_mode_id >= 0), (unsigned)_mode_id,
 			 static_cast<unsigned>(_rejected_commands));
-		PX4_INFO("turn_heading=rover_mag_v8 flags_timeout=2000ms");
+		PX4_INFO("turn_heading=rover_mag_v9 flags_timeout=2000ms att_ts_fix=1 freeze_release=v9");
 		return 0;
 	}
 
@@ -236,55 +236,101 @@ private:
 		return true;
 	}
 
-	bool velocity_feedback(uint64_t now, const vehicle_local_position_s &local, float &motion_speed)
+	bool velocity_feedback(uint64_t now, const vehicle_local_position_s &local, float &motion_speed,
+			       const char **reason_out = nullptr, uint64_t *sample_ts_out = nullptr, uint64_t *check_now_out = nullptr)
 	{
+		auto fail = [&](const char *reason, uint64_t ts, uint64_t check_now) {
+			if (reason_out) { *reason_out = reason; }
+			if (sample_ts_out) { *sample_ts_out = ts; }
+			if (check_now_out) { *check_now_out = check_now; }
+			return false;
+		};
 		if (_wheel_feedback_enabled) {
 			wheel_encoders_s wheel{};
 			vgsolar_encoder_status_s capture{};
-			if (!_wheel_sub.copy(&wheel) || !_wheel_capture_sub.copy(&capture)) { return false; }
-			const auto feedback = rover_control::wheel_feedback(now, wheel.timestamp, wheel.wheel_speed[0],
+			if (!_wheel_sub.copy(&wheel)) { return fail("wheel_missing", 0, hrt_absolute_time()); }
+			if (!_wheel_capture_sub.copy(&capture)) { return fail("capture_missing", 0, hrt_absolute_time()); }
+			const uint64_t wheel_now = hrt_absolute_time();
+			const auto feedback = rover_control::wheel_feedback(wheel_now, wheel.timestamp, wheel.wheel_speed[0],
 					wheel.wheel_speed[1], capture.timestamp, capture.capture_active, _wheel_radius_m);
 			motion_speed = feedback.maximum_track_speed_m_s;
-			return feedback.valid;
+			if (!feedback.valid) {
+				if (!capture.capture_active) { return fail("wheel_capture_inactive", capture.timestamp, wheel_now); }
+				if (wheel.timestamp == 0 || wheel.timestamp > wheel_now || wheel_now - wheel.timestamp >= 500000) {
+					return fail("wheel_ts", wheel.timestamp, wheel_now);
+				}
+				if (capture.timestamp == 0 || capture.timestamp > wheel_now || wheel_now - capture.timestamp >= 500000) {
+					return fail("capture_ts", capture.timestamp, wheel_now);
+				}
+				return fail("wheel_invalid", wheel.timestamp, wheel_now);
+			}
+			return true;
 		}
 		motion_speed = hypotf(local.vx, local.vy);
-		return local.timestamp > 0 && local.timestamp <= now && now - local.timestamp < 500000
-		       && local.v_xy_valid && PX4_ISFINITE(local.vx) && PX4_ISFINITE(local.vy) && PX4_ISFINITE(motion_speed);
+		if (local.timestamp == 0 || local.timestamp > now || now - local.timestamp >= 500000) {
+			return fail("local_vel_ts", local.timestamp, now);
+		}
+		if (!local.v_xy_valid || !PX4_ISFINITE(local.vx) || !PX4_ISFINITE(local.vy) || !PX4_ISFINITE(motion_speed)) {
+			return fail("local_vel_invalid", local.timestamp, now);
+		}
+		return true;
 	}
 
-	bool turn_heading_valid(uint64_t now, const vehicle_local_position_s &local)
+	bool turn_heading_valid(uint64_t now, const vehicle_local_position_s &local,
+				const char **reason_out = nullptr, uint64_t *sample_ts_out = nullptr, uint64_t *check_now_out = nullptr)
 	{
-		if (local.timestamp == 0 || local.timestamp > now || now - local.timestamp > 500000
-		    || !PX4_ISFINITE(local.heading)) { return false; }
+		auto fail = [&](const char *reason, uint64_t ts, uint64_t check_now) {
+			if (reason_out) { *reason_out = reason; }
+			if (sample_ts_out) { *sample_ts_out = ts; }
+			if (check_now_out) { *check_now_out = check_now; }
+			return false;
+		};
+		if (local.timestamp == 0 || local.timestamp > now || now - local.timestamp > 500000) {
+			return fail("local_hdg_ts", local.timestamp, now);
+		}
+		if (!PX4_ISFINITE(local.heading)) { return fail("local_hdg_nan", local.timestamp, now); }
 		if (local.heading_good_for_control) { return true; }
 
 		// EKF's final magnetic alignment is an in-flight criterion. Ground rovers
 		// may use aligned, healthy magnetic yaw without climbing above the ground.
 		vehicle_status_s vehicle{};
 		if (!_vehicle_status_sub.copy(&vehicle) || vehicle.vehicle_type != vehicle_status_s::VEHICLE_TYPE_ROVER) {
-			return false;
+			return fail("not_rover", vehicle.timestamp, hrt_absolute_time());
 		}
 		uint8_t instance = 0;
 		estimator_selector_status_s selector{};
 		if (_estimator_selector_sub.copy(&selector)) {
-			if (selector.timestamp == 0 || selector.timestamp > now || now - selector.timestamp > 2000000) { return false; }
+			const uint64_t sel_now = hrt_absolute_time();
+			if (selector.timestamp == 0 || selector.timestamp > sel_now || sel_now - selector.timestamp > 2000000) {
+				return fail("ekf_selector_ts", selector.timestamp, sel_now);
+			}
 			instance = selector.primary_instance;
 		} else if (integer("SENS_IMU_MODE", 1) == 0) {
-			return false; // Multi-EKF must identify the selected estimator.
+			return fail("ekf_selector_missing", 0, hrt_absolute_time()); // Multi-EKF must identify the selected estimator.
 		}
-		if (_estimator_flags_sub.get_instance() != instance && !_estimator_flags_sub.ChangeInstance(instance)) { return false; }
+		if (_estimator_flags_sub.get_instance() != instance && !_estimator_flags_sub.ChangeInstance(instance)) {
+			return fail("ekf_flags_instance", 0, hrt_absolute_time());
+		}
 		estimator_status_flags_s flags{};
-		return _estimator_flags_sub.copy(&flags) && flags.timestamp > 0 && flags.timestamp <= now
-		       // EKF2 publishes unchanged status flags at ~1 Hz (changes immediately).
-		       && now - flags.timestamp <= 2000000 && flags.cs_yaw_align
-		       && (flags.cs_mag_hdg || flags.cs_mag_3d)
-		       && !flags.cs_mag_fault && !flags.cs_mag_field_disturbed;
+		if (!_estimator_flags_sub.copy(&flags)) { return fail("ekf_flags_missing", 0, hrt_absolute_time()); }
+		const uint64_t flags_now = hrt_absolute_time();
+		if (flags.timestamp == 0 || flags.timestamp > flags_now || flags_now - flags.timestamp > 2000000) {
+			return fail("ekf_flags_ts", flags.timestamp, flags_now);
+		}
+		// EKF2 publishes unchanged status flags at ~1 Hz (changes immediately).
+		if (!flags.cs_yaw_align) { return fail("ekf_no_yaw_align", flags.timestamp, flags_now); }
+		if (!(flags.cs_mag_hdg || flags.cs_mag_3d)) { return fail("ekf_no_mag_hdg", flags.timestamp, flags_now); }
+		if (flags.cs_mag_fault) { return fail("ekf_mag_fault", flags.timestamp, flags_now); }
+		if (flags.cs_mag_field_disturbed) { return fail("ekf_mag_disturbed", flags.timestamp, flags_now); }
+		return true;
 	}
 
-	void observe_navigation_frame(uint64_t now)
+	void observe_navigation_frame()
 	{
 		vehicle_local_position_s local{};
-		if (!_local_position_sub.copy(&local) || local.timestamp == 0 || local.timestamp > now
+		if (!_local_position_sub.copy(&local)) { return; }
+		const uint64_t now = hrt_absolute_time();
+		if (local.timestamp == 0 || local.timestamp > now
 		    || now - local.timestamp >= 500000 || !local.xy_valid || !PX4_ISFINITE(local.x) || !PX4_ISFINITE(local.y)) { return; }
 		if (_nav_frame_seen && (local.xy_reset_counter != _nav_frame_xy_reset || local.ref_timestamp != _nav_frame_reference)) {
 			// The mode-entry NED origin belongs to the previous estimator frame.
@@ -316,6 +362,29 @@ private:
 		ack(vgsolar_command_s::CMD_POSITION, false);
 	}
 
+ void log_attitude_fault(uint64_t now, const char *reason, uint64_t sample_ts, float roll_deg, float pitch_deg) {
+  if (_last_att_diag != 0 && now >= _last_att_diag && now - _last_att_diag < 1000000) { return; }
+  _last_att_diag = now;
+  const long long age_ms = sample_ts == 0 ? -1LL : (now >= sample_ts
+   ? static_cast<long long>((now - sample_ts) / 1000ULL)
+   : -static_cast<long long>((sample_ts - now) / 1000ULL));
+  PX4_WARN("vgsolar attitude fault (%s): ts=%llu now=%llu age_ms=%lld roll=%.1f pitch=%.1f state=%u phase=%u",
+   reason, static_cast<unsigned long long>(sample_ts), static_cast<unsigned long long>(now),
+   age_ms, static_cast<double>(roll_deg), static_cast<double>(pitch_deg),
+   static_cast<unsigned>(_suction.state()), static_cast<unsigned>(_turn_phase));
+  (void)reason; (void)age_ms; (void)roll_deg; (void)pitch_deg;
+ }
+ void log_turn_reject(uint64_t now, const char *reason, uint64_t sample_ts, uint64_t check_now) {
+  if (_last_turn_diag != 0 && now >= _last_turn_diag && now - _last_turn_diag < 1000000) { return; }
+  _last_turn_diag = now;
+  const long long age_ms = sample_ts == 0 ? -1LL : (check_now >= sample_ts
+   ? static_cast<long long>((check_now - sample_ts) / 1000ULL)
+   : -static_cast<long long>((sample_ts - check_now) / 1000ULL));
+  PX4_WARN("vgsolar turn rejected (%s): ts=%llu now=%llu age_ms=%lld phase=%u",
+   reason, static_cast<unsigned long long>(sample_ts), static_cast<unsigned long long>(check_now),
+   age_ms, static_cast<unsigned>(_turn_phase));
+  (void)reason; (void)age_ms;
+ }
  void turn_result(bool success, uint8_t reason) {
   if (_turn_result_sent) { return; }
   _turn_result_sent = true; event(5, _turn_command, success, reason);
@@ -347,7 +416,15 @@ private:
     : !_suction.raised() ? 3 : _safety_hold ? 4 : state == vgsolar_mode::State::Navigation ? 5 : 6;
   if (!accepted && reason == 6 && command.command == vgsolar_command_s::CMD_TURN) {
    vehicle_local_position_s local{};
-   if (!_local_position_sub.copy(&local) || !turn_heading_valid(hrt_absolute_time(), local)) { reason = 9; }
+   const char *reject_reason = "local_missing";
+   uint64_t reject_ts = 0;
+   uint64_t reject_now = 0;
+   const bool copied = _local_position_sub.copy(&local);
+   const uint64_t check_now = hrt_absolute_time();
+   if (!copied || !turn_heading_valid(check_now, local, &reject_reason, &reject_ts, &reject_now)) {
+    reason = 9;
+    log_turn_reject(check_now, reject_reason, reject_ts, copied ? reject_now : check_now);
+   }
   }
   event(1, command, accepted, reason);
  }
@@ -362,8 +439,8 @@ private:
 				enter_estop(0);
 			} else if (command.system_command == SYSTEM_ESTOP_CLEAR) {
 				if (_logic.state() != State::Estop) { _rejected_commands++; return; }
-				if (!range_safe(now, true)) { _rejected_commands++; return; }
-				if (_range_enabled && !range_safe(now)) {
+				if (!range_safe(true)) { _rejected_commands++; return; }
+				if (_range_enabled && !range_safe()) {
 					vgsolar_safety_request_s request{};
 					request.timestamp = now;
 					request.clear = true;
@@ -389,8 +466,9 @@ private:
 		if (command.command == vgsolar_command_s::CMD_SPEED) {
 			vehicle_local_position_s velocity{};
 			_local_position_sub.copy(&velocity);
+			const uint64_t vel_now = hrt_absolute_time();
 			float motion_speed = NAN;
-			const bool velocity_ok = velocity_feedback(now, velocity, motion_speed);
+			const bool velocity_ok = velocity_feedback(vel_now, velocity, motion_speed);
 			const bool stop_requested = command.velocity_cms == 0 && (command.control_mode == SPEED_YAW || command.yaw_data == 0);
 			const bool valid = armed && _enabled && (velocity_ok || stop_requested) && !_safety_hold && _suction.raised() && valid_speed(command.control_mode, command.velocity_cms, command.yaw_data)
 					   && _logic.state() != State::Turn && _logic.state() != State::Navigation
@@ -431,8 +509,10 @@ private:
 
 			vehicle_local_position_s local{};
 			float motion_speed = NAN;
-			const bool local_ok = _local_position_sub.copy(&local) && local.timestamp != 0 && now >= local.timestamp
-					       && now - local.timestamp <= 500000 && local.xy_valid && velocity_feedback(now, local, motion_speed)
+			const bool copied_local = _local_position_sub.copy(&local);
+			const uint64_t local_now = hrt_absolute_time();
+			const bool local_ok = copied_local && local.timestamp != 0 && local_now >= local.timestamp
+					       && local_now - local.timestamp <= 500000 && local.xy_valid && velocity_feedback(local_now, local, motion_speed)
 						       && local.heading_good_for_control
 					       && PX4_ISFINITE(local.heading) && PX4_ISFINITE(local.x) && PX4_ISFINITE(local.y);
 			if (!armed || !_enabled || _safety_hold || !_suction.raised() || _logic.state() == State::Turn || !local_ok || command.nav_mode < 1 || command.nav_mode > 3
@@ -504,11 +584,13 @@ private:
 		if (command.command == vgsolar_command_s::CMD_TURN) {
 			const bool replaces_navigation = _logic.state() == State::Navigation;
 			vehicle_local_position_s local{};
+			const bool copied_local = _local_position_sub.copy(&local);
+			const uint64_t local_now = hrt_absolute_time();
 			if (!armed || !_enabled || !_cleaner_enabled || _safety_hold || !_suction.raised()
 			    || !valid_turn(command.turn_mode, command.turn_direction, command.turn_angle_cd, command.turn_rate_cds)
-			    || !_local_position_sub.copy(&local) || !turn_heading_valid(now, local)
-			    || (_suction.config().use_ir && !fresh_inputs(now, true))
-			    || (_suction.config().use_pressure && !fresh_inputs(now, false))
+			    || !copied_local || !turn_heading_valid(local_now, local)
+			    || (_suction.config().use_ir && !fresh_inputs(true))
+			    || (_suction.config().use_pressure && !fresh_inputs(false))
 			    || !_logic.command(Command::Turn, true).accepted) {
 				_rejected_commands++;
 				return;
@@ -531,13 +613,15 @@ private:
 		}
 	}
 
-	void update_navigation(uint64_t now)
+	void update_navigation(uint64_t /*now*/)
 	{
 		if (_logic.state() != vgsolar_mode::State::Navigation) { return; }
 		vehicle_local_position_s local{};
 		float motion_speed = NAN;
-		if (!_local_position_sub.copy(&local) || local.timestamp == 0 || now < local.timestamp
-		    || now - local.timestamp > 500000 || !local.xy_valid || !velocity_feedback(now, local, motion_speed)
+		const bool copied_local = _local_position_sub.copy(&local);
+		const uint64_t local_now = hrt_absolute_time();
+		if (!copied_local || local.timestamp == 0 || local_now < local.timestamp
+		    || local_now - local.timestamp > 500000 || !local.xy_valid || !velocity_feedback(local_now, local, motion_speed)
 		    || !local.heading_good_for_control
 		    || !PX4_ISFINITE(local.heading) || !PX4_ISFINITE(local.x) || !PX4_ISFINITE(local.y)
 		    || local.xy_reset_counter != _nav_xy_reset || local.heading_reset_counter != _nav_heading_reset
@@ -594,16 +678,20 @@ private:
 
 
 
-	bool fresh_inputs(uint64_t now, bool infrared) {
+	bool fresh_inputs(bool infrared) {
 		vgsolar_inputs_s input{};
-		return _inputs_sub.copy(&input) && input.enabled && input.timestamp > 0 && now >= input.timestamp
+		if (!_inputs_sub.copy(&input)) { return false; }
+		const uint64_t now = hrt_absolute_time();
+		return input.enabled && input.timestamp > 0 && now >= input.timestamp
 		       && now - input.timestamp < 500000 && (infrared ? input.ir_sample_valid : input.pressure_valid);
 	}
-	bool range_safe(uint64_t now, bool allow_clear = false)
+	bool range_safe(bool allow_clear = false)
 	{
 		if (!_range_enabled) { return true; }
 		vgsolar_safety_status_s safety{};
-		return _safety_sub.copy(&safety) && safety.enabled && safety.config_valid
+		if (!_safety_sub.copy(&safety)) { return false; }
+		const uint64_t now = hrt_absolute_time();
+		return safety.enabled && safety.config_valid
 		       && safety.timestamp > 0 && now >= safety.timestamp && now - safety.timestamp < 500000
 		       && safety.left_valid && safety.right_valid
 		       && (allow_clear ? safety.clear_eligible || !safety.stop_request : !safety.stop_request && !safety.latched);
@@ -621,9 +709,11 @@ private:
 		stop_motion();
 		_suction.emergency_release(hrt_absolute_time());
 	}
-	void service_release(uint64_t now) {
+	void service_release() {
   vgsolar_inputs_s report{}; vgsolar_robot::Inputs input{};
-  if (_inputs_sub.copy(&report) && report.enabled && report.timestamp > 0 && report.timestamp <= now && now - report.timestamp < 500000) {
+  const bool copied = _inputs_sub.copy(&report);
+  const uint64_t now = hrt_absolute_time();
+  if (copied && report.enabled && report.timestamp > 0 && report.timestamp <= now && now - report.timestamp < 500000) {
    input.fresh = true; input.ir_valid = report.ir_sample_valid; input.blade = report.ir_blade_present;
    input.pressure_valid = report.pressure_valid; input.pressure_kpa = report.pressure_kpa;
   }
@@ -631,21 +721,23 @@ private:
  }
  void update_robot(uint64_t now)
 	{
-		if (!range_safe(now)) {
+		if (!range_safe()) {
 			enter_estop(1u << 11);
 		}
 		if (_pending_range_clear && now - _clear_requested_at > 500000) { _pending_range_clear = false; }
-		if (_pending_range_clear && range_safe(now)) {
+		if (_pending_range_clear && range_safe()) {
 			_pending_range_clear = false;
 			_logic.command(vgsolar_mode::Command::ClearEstop, _armed);
 			_fault_code &= static_cast<uint16_t>(~(1u << 11));
 		}
-		if (_logic.state() == vgsolar_mode::State::Estop) { service_release(now); return; }
+		if (_logic.state() == vgsolar_mode::State::Estop) { service_release(); return; }
 		if (low_battery()) { _brush_params = {}; }
 		vgsolar_robot::Inputs input{};
 		vgsolar_inputs_s report{};
-		if (_inputs_sub.copy(&report) && report.enabled && report.timestamp > 0 && now >= report.timestamp
-		    && now - report.timestamp < 500000) {
+		const bool copied_inputs = _inputs_sub.copy(&report);
+		const uint64_t input_now = hrt_absolute_time();
+		if (copied_inputs && report.enabled && report.timestamp > 0 && input_now >= report.timestamp
+		    && input_now - report.timestamp < 500000) {
 			input.fresh = true;
 			input.ir_valid = report.ir_sample_valid;
 			input.blade = report.ir_blade_present;
@@ -654,14 +746,33 @@ private:
 		}
 		if (_suction.lowered() || _suction.busy() || _suction.frozen()) {
 			vehicle_attitude_s attitude{};
+			const bool copied_att = _attitude_sub.copy(&attitude);
+			const uint64_t att_now = hrt_absolute_time();
+			const char *att_reason = "ok";
+			float roll_deg = NAN, pitch_deg = NAN;
 			bool tilt_bad = true;
-			if (_attitude_sub.copy(&attitude) && attitude.timestamp > 0 && now >= attitude.timestamp
-			    && now - attitude.timestamp < 500000) {
+			if (!copied_att) {
+				att_reason = "missing";
+			} else if (attitude.timestamp == 0) {
+				att_reason = "ts_zero";
+			} else if (attitude.timestamp > att_now) {
+				att_reason = "ts_future";
+			} else if (att_now - attitude.timestamp >= 500000) {
+				att_reason = "ts_stale";
+			} else {
 				const matrix::Eulerf euler{matrix::Quatf{attitude.q}};
-				tilt_bad = !PX4_ISFINITE(euler.phi()) || !PX4_ISFINITE(euler.theta())
-					   || fabsf(euler.phi()) > math::radians(30.f) || fabsf(euler.theta()) > math::radians(30.f);
+				roll_deg = math::degrees(euler.phi());
+				pitch_deg = math::degrees(euler.theta());
+				if (!PX4_ISFINITE(euler.phi()) || !PX4_ISFINITE(euler.theta())) {
+					att_reason = "non_finite";
+				} else if (fabsf(euler.phi()) > math::radians(30.f) || fabsf(euler.theta()) > math::radians(30.f)) {
+					att_reason = "tilt_limit";
+				} else {
+					tilt_bad = false;
+				}
 			}
 			if (tilt_bad) {
+				log_attitude_fault(att_now, att_reason, attitude.timestamp, roll_deg, pitch_deg);
 				_fault_code |= 1u << 9;
 				_safety_hold = true;
 				_suction.freeze();
@@ -669,15 +780,14 @@ private:
 				stop_motion();
 			} else if (_safety_hold) {
 				abort_task();
-				_suction.unfreeze();
-				if (_suction.lowered()) { _suction.raise(now); }
+				_suction.emergency_release(att_now);
 				_safety_hold = false;
 				_fault_code &= static_cast<uint16_t>(~(1u << 9));
 			}
 		}
 		const bool actuator_permission = _enabled && _cleaner_enabled && _mode_active && _armed;
 		if (!actuator_permission && _logic.state() == vgsolar_mode::State::Turn) { abort_task(); }
-		_suction.tick(now, actuator_permission, input);
+		_suction.tick(hrt_absolute_time(), actuator_permission, input);
 		if (_suction.fault()) {
 			_fault_code |= 1u << 4;
 			abort_task();
@@ -690,11 +800,25 @@ private:
 		if (_logic.state() != vgsolar_mode::State::Turn) { return; }
 		vehicle_local_position_s local{};
 		float motion_speed = NAN;
-		const bool local_ok = _local_position_sub.copy(&local) && local.timestamp > 0 && now >= local.timestamp
-				      && now - local.timestamp < 500000 && velocity_feedback(now, local, motion_speed)
-				      && turn_heading_valid(now, local)
-				      && local.heading_reset_counter == _turn_heading_reset;
+		const bool copied_local = _local_position_sub.copy(&local);
+		const uint64_t local_now = hrt_absolute_time();
+		const char *reject_reason = "unknown";
+		uint64_t reject_ts = 0;
+		uint64_t reject_now = local_now;
+		bool local_ok = true;
+		if (!copied_local) {
+			local_ok = false; reject_reason = "local_missing";
+		} else if (local.timestamp == 0 || local_now < local.timestamp || local_now - local.timestamp >= 500000) {
+			local_ok = false; reject_reason = "local_ts"; reject_ts = local.timestamp;
+		} else if (!velocity_feedback(local_now, local, motion_speed, &reject_reason, &reject_ts, &reject_now)) {
+			local_ok = false;
+		} else if (!turn_heading_valid(local_now, local, &reject_reason, &reject_ts, &reject_now)) {
+			local_ok = false;
+		} else if (local.heading_reset_counter != _turn_heading_reset) {
+			local_ok = false; reject_reason = "heading_reset"; reject_ts = local.timestamp;
+		}
 		if (_turn_phase != vgsolar_mode::TurnPhase::RaiseSuction && (!local_ok || (_turn_phase == vgsolar_mode::TurnPhase::Turning && now - _turn_phase_start > static_cast<uint64_t>(_turn_timeout_s * 1000000.f)))) {
+			if (!local_ok) { log_turn_reject(local_now, reject_reason, reject_ts, reject_now); }
 			turn_result(false, !local_ok ? 9 : 8);
 			_turn_phase = vgsolar_mode::TurnPhase::RaiseSuction;
 			stop_motion();
@@ -759,7 +883,8 @@ private:
 	{
 		vehicle_status_s status{};
 		if (!_vehicle_status_sub.copy(&status) || _mode_id < 0) { return; }
-		if (status.timestamp == 0 || hrt_absolute_time() < status.timestamp || hrt_absolute_time() - status.timestamp > 2000000) {
+		const uint64_t status_now = hrt_absolute_time();
+		if (status.timestamp == 0 || status_now < status.timestamp || status_now - status.timestamp > 2000000) {
 			abort_task(); _suction.emergency_release(hrt_absolute_time()); _armed = false; publish_cleaner(false); publish_mode_status(false); return;
 		}
 		if (status.nav_state != _mode_id || !_enabled) {
@@ -774,8 +899,9 @@ private:
 			_mode_active = false;
 			vgsolar_command_s command{};
 			while (_command_sub.update(&command)) {
-				if (command.timestamp == 0 || command.timestamp > hrt_absolute_time()
-				    || hrt_absolute_time() - command.timestamp > COMMAND_STALE_US) { continue; }
+				const uint64_t cmd_now = hrt_absolute_time();
+				if (command.timestamp == 0 || command.timestamp > cmd_now
+				    || cmd_now - command.timestamp > COMMAND_STALE_US) { continue; }
 				process_parameter_command(command);
 			}
 			publish_mode_status(false);
@@ -791,8 +917,9 @@ private:
 			_nav_origin_invalidated = false;
 			_nav_frame_seen = false;
 			vehicle_local_position_s local{};
+			const bool copied_entry_local = _local_position_sub.copy(&local);
 			const uint64_t entered_at = hrt_absolute_time();
-			if (_local_position_sub.copy(&local) && local.timestamp > 0 && entered_at >= local.timestamp
+			if (copied_entry_local && local.timestamp > 0 && entered_at >= local.timestamp
 			    && entered_at - local.timestamp < 500000 && local.xy_valid && PX4_ISFINITE(local.x) && PX4_ISFINITE(local.y)) {
 				_nav_origin_x = local.x;
 				_nav_origin_y = local.y;
@@ -801,19 +928,21 @@ private:
 			_mode_active = true;
 		}
 		actuator_armed_s actuator{};
+		const bool copied_arm = _actuator_armed_sub.copy(&actuator);
 		const uint64_t arm_now = hrt_absolute_time();
 		const bool armed = status.arming_state == vehicle_status_s::ARMING_STATE_ARMED
 				   && (!status.safety_button_available || status.safety_off)
-				   && _actuator_armed_sub.copy(&actuator) && actuator.armed && !actuator.lockdown
+				   && copied_arm && actuator.armed && !actuator.lockdown
 				   && !actuator.kill && !actuator.termination && !actuator.in_esc_calibration_mode
 				   && actuator.timestamp > 0 && arm_now >= actuator.timestamp && arm_now - actuator.timestamp < 2000000;
 		const bool arm_edge = armed && !_armed;
 		_armed = armed;
-		observe_navigation_frame(arm_now);
+		observe_navigation_frame();
 		vgsolar_command_s command{}, system{}, turn{}, nav{}, speed_command{};
 		bool have_system = false, have_turn = false, have_nav = false, have_speed = false;
 		for (unsigned count = 0; count < 32 && _command_sub.update(&command); ++count) {
-			if (command.timestamp == 0 || command.timestamp > arm_now || arm_now - command.timestamp > COMMAND_STALE_US) { continue; }
+			const uint64_t cmd_now = hrt_absolute_time();
+			if (command.timestamp == 0 || command.timestamp > cmd_now || cmd_now - command.timestamp > COMMAND_STALE_US) { continue; }
 			if (command.command == vgsolar_command_s::CMD_SYSTEM) { system = command; have_system = true; }
 			else if (command.command == vgsolar_command_s::CMD_PARAM_WRITE || command.command == vgsolar_command_s::CMD_PARAM_READ) {
 				process_parameter_command(command);
@@ -853,11 +982,12 @@ private:
 		update_robot(now);
 		if (_logic.state() == vgsolar_mode::State::Yaw || _logic.state() == vgsolar_mode::State::YawRate) {
 			vehicle_local_position_s local{};
-			_local_position_sub.copy(&local);
+			const bool copied_local = _local_position_sub.copy(&local);
+			const uint64_t local_now = hrt_absolute_time();
 			float motion_speed = NAN;
-			const bool heading_ok = local.timestamp > 0 && now >= local.timestamp && now - local.timestamp < 500000
+			const bool heading_ok = copied_local && local.timestamp > 0 && local_now >= local.timestamp && local_now - local.timestamp < 500000
 						&& local.heading_good_for_control && PX4_ISFINITE(local.heading);
-			if (!velocity_feedback(now, local, motion_speed)
+			if (!copied_local || !velocity_feedback(local_now, local, motion_speed)
 			    || (_logic.state() == vgsolar_mode::State::Yaw && !heading_ok)) {
 				abort_task();
 			}
@@ -1027,6 +1157,7 @@ private:
 	vgsolar_robot::Suction _suction{};
 	vgsolar_mode::TurnPhase _turn_phase{vgsolar_mode::TurnPhase::Idle};
 	uint64_t _turn_start{0}, _turn_phase_start{0}, _last_config{0}, _last_registration{0}, _clear_requested_at{0};
+	uint64_t _last_att_diag{0}, _last_turn_diag{0};
 	float _turn_target{0.f}, _turn_rate{0.f};
 	vgsolar_mode::TurnProgress _turn_progress{};
 	bool _turn_moving{false};

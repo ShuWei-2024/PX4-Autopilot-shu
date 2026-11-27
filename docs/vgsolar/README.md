@@ -1,6 +1,6 @@
 # VGSolar PX4 功能迁移：当前状态与阅读目录
 
-更新日期：2026-11-16。适用分支 `v1.17.0_vgsolar`。最新实测、逐机参数及下一步见 [11月16日阶段记录](validation_20261116.md)；[11月13日记录](validation_20261113.md)保留历史状态。早期迁移分支和提交仅作为历史来源。
+更新日期：2026-11-27。适用分支 `v1.17.0_vgsolar`。最新实测与下一步见 [11月27日阶段记录](validation_20261127.md)；[11月16日记录](validation_20261116.md) 与 [11月13日记录](validation_20261113.md) 保留历史状态。早期迁移分支和提交仅作为历史来源。
 
 APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1376982babc988c`。早期任务书位于 Windows `E:/shuwei/px4/outputs/VGSolar_APM到PX4功能迁移计划.md`，该本地路径不随仓库发布。
 
@@ -26,7 +26,7 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 2. [现状与实机验收清单](../../boards/vg/vgsolar/PORTING.md)：已实现内容、已有证据、待验项目。
 3. [软件行为与参数](software_parity.md)：APM 对应关系、机构释放、电量和导航行为。
 4. [工具与测试](../../Tools/vgsolar/README.md)、[NCU 客户端](../../Tools/vgsolar/README_ncu_client.md)：离线入口和当前双向串口联调方法。
-5. [11月16日实测与下一步](validation_20261116.md)、[11月13日历史记录](validation_20261113.md)、[参数存储](parameter_storage.md)、[编码器速度/米数](ENCODER_QGC_SPEED.md)、[双超声波诊断](DYP_UART_DIAGNOSTICS.md)。
+5. [11月27日实测与下一步](validation_20261127.md)、[11月16日历史记录](validation_20261116.md)、[11月13日历史记录](validation_20261113.md)、[参数存储](parameter_storage.md)、[编码器速度/米数](ENCODER_QGC_SPEED.md)、[双超声波诊断](DYP_UART_DIAGNOSTICS.md)。
 6. [核心板启动及近期修复](hardware_bringup.md)、[启动蓝灯](startup_led.md)、[阀泵测试](VALVE_PUMP_BENCH.md)：按具体问题查阅。
 
 ## 早期实现过程
@@ -45,4 +45,4 @@ APM 参考为 Ubuntu-22.04 `/home/yuyuyyu/rover` 的 `5505db87886beb85383020d9d1
 
 11月16日已验证两侧执行器方向、编码器反馈、架空0.2 m/s连续运行和WSL原生ROS2速度命令链路；吸盘下降、抽气和回收动作已观察。地面磁航向入口修复与回归见 [转弯航向修复](turn_ground_heading_20261116.md)。
 
-完整吸附转弯尚未通过：出现运行中航向/反馈拒绝和姿态保护中止，最后放平复测缺少对应ULog。下一步定位异步时间戳判断及异常回收路径，保留真实倾角、陈旧数据与真空保护。详见 [最新阶段记录](validation_20261116.md)。地面轨迹、实际距离精度、断链停车、动态航向和整车负载仍待验收；电压保留既有标定，电流尚未标定。
+11月27日完成 V9 样本时序与冻结安全回收修复并实机刷写验证：消除运行中 `fault_code=512` 与 `reason=9` 误报，调节 `RO_YAW_RATE_P=0.3` / `RO_YAW_RATE_I=0.5` / `RO_YAW_RATE_LIM=20.0` 后，实车完成 `10° / 10°/s` 左转（实测 `-10.10°`、`kind=5, acc=1, reason=0`）与 `90° / 15°/s` 右转（实测 `+90.65°`）的完整吸附、抽真空、差速转弯与泄压抬升闭环。详见 [11月27日阶段记录](validation_20261127.md)。倾斜 >30° 实机保护回收、地面轨迹、实际距离精度、断链停车和整车负载仍待验收；电压保留既有标定，电流尚未标定。

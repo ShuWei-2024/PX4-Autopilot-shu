@@ -351,5 +351,154 @@ int main()
 	assert(host::reboot_requested && !host::gpio[GPIO_VG_PUMP_OFF] && host::gpio[GPIO_VG_VALVE_OFF]);
 	servos = host::latest<actuator_servos_s>("actuator_servos");
 	for (float value : servos.control) { assert(!std::isfinite(value)); }
+
+	// V9 regression 1: async uORB updates arriving after loop `now` but before `.copy()` must NOT false-trigger fault_code=512 or reason=9.
+	host::parameter<int32_t>("VGS_SAFE_EN", 0);
+	range_messages = false;
+	for (int i = 0; i < 55; ++i) { step(mode, false); } // apply VGS_SAFE_EN=0
+	host::parameter<int32_t>("VGS_WHL_CTRL", 1);
+	for (int i = 0; i < 55; ++i) { step(mode, false); } // latch wheel feedback
+	step(mode, true);
+	local.heading_good_for_control = false;
+	local.heading = 0.f;
+	yaw_flags.cs_yaw_align = true;
+	yaw_flags.cs_mag_hdg = true;
+	yaw_flags.cs_mag_fault = false;
+	yaw_flags.cs_mag_field_disturbed = false;
+	slow_yaw_flags = false;
+	host::on_copy = [](const char *name) {
+		if (std::strcmp(name, "vehicle_attitude") == 0) {
+			host::now += 500;
+			vehicle_attitude_s att{}; att.timestamp = host::now;
+			matrix::Quatf{matrix::Eulerf{attitude_roll, 0.f, local.heading}}.copyTo(att.q);
+			host::publish("vehicle_attitude", att);
+		} else if (std::strcmp(name, "vehicle_local_position") == 0) {
+			host::now += 500;
+			local.timestamp = host::now;
+			host::publish("vehicle_local_position", local);
+		} else if (std::strcmp(name, "wheel_encoders") == 0) {
+			host::now += 500;
+			wheel_encoders_s w{}; w.timestamp = host::now;
+			w.wheel_speed[0] = right_speed; w.wheel_speed[1] = left_speed;
+			host::publish("wheel_encoders", w);
+		} else if (std::strcmp(name, "vgsolar_encoder_status") == 0) {
+			host::now += 500;
+			vgsolar_encoder_status_s c{}; c.timestamp = host::now; c.capture_active = wheel_active;
+			host::publish("vgsolar_encoder_status", c);
+		} else if (std::strcmp(name, "estimator_selector_status") == 0) {
+			host::now += 500;
+			estimator_selector_status_s sel{}; sel.timestamp = host::now; sel.primary_instance = 0;
+			host::publish("estimator_selector_status", sel);
+		} else if (std::strcmp(name, "estimator_status_flags") == 0) {
+			host::now += 500;
+			yaw_flags.timestamp = host::now;
+			host::publish("estimator_status_flags", yaw_flags);
+		}
+	};
+	send(turn()); step(mode);
+	assert(status().state == 3 && !(status().fault_code & (1u << 9)));
+	for (int i = 0; i < 200 && status().turn_phase != 4; ++i) {
+		step(mode);
+		assert(!(status().fault_code & (1u << 9)));
+	}
+	assert(status().turn_phase == 4 && status().motion_allowed);
+	for (int i = 1; i <= 16 && status().turn_phase == 4; ++i) { local.heading = -.1f * i; step(mode); }
+	assert(status().turn_phase == 5);
+	for (int i = 0; i < 100 && status().state == 3; ++i) { step(mode); }
+	assert(status().state == 0 && !(status().fault_code & (1u << 9)));
+	host::on_copy = nullptr;
+	local.heading = 0.f;
+	local.heading_good_for_control = true;
+	host::parameter<int32_t>("VGS_WHL_CTRL", 0);
+	for (int i = 0; i < 55; ++i) { step(mode, false); }
+	step(mode, true);
+
+	// V9 regression 2: genuine invalid attitude (ts=0, future, stale, NaN, >30deg, missing) still triggers fault 512 & freeze.
+	auto check_bad_att = [&](auto inject_fn) {
+		send(turn()); step(mode);
+		for (int i = 0; i < 200 && status().turn_phase != 4; ++i) { step(mode); }
+		assert(status().turn_phase == 4);
+		host::now += 20000;
+		vehicle_status_s v{}; v.timestamp = host::now; v.nav_state = mode_id; v.vehicle_type = vehicle_status_s::VEHICLE_TYPE_ROVER; v.arming_state = vehicle_status_s::ARMING_STATE_ARMED;
+		host::publish("vehicle_status", v);
+		actuator_armed_s a{}; a.timestamp = host::now; a.armed = true; host::publish("actuator_armed", a);
+		local.timestamp = host::now; host::publish("vehicle_local_position", local);
+		inject_fn();
+		mode.Run();
+		assert(status().suction_frozen && (status().fault_code & (1u << 9)) && !status().motion_allowed);
+		attitude_roll = 0.f;
+		step(mode);
+		assert(!status().suction_frozen && status().state == 0 && !(status().fault_code & (1u << 9)));
+		for (int i = 0; i < 150 && !mode._suction.raised(); ++i) { step(mode); }
+		assert(mode._suction.raised());
+	};
+	check_bad_att([&]() { vehicle_attitude_s att{}; att.timestamp = 0; att.q[0] = 1.f; host::publish("vehicle_attitude", att); });
+	check_bad_att([&]() { vehicle_attitude_s att{}; att.timestamp = host::now + 5000; att.q[0] = 1.f; host::publish("vehicle_attitude", att); });
+	check_bad_att([&]() { vehicle_attitude_s att{}; att.timestamp = host::now - 600000; att.q[0] = 1.f; host::publish("vehicle_attitude", att); });
+	check_bad_att([&]() { vehicle_attitude_s att{}; att.timestamp = host::now; att.q[0] = NAN; host::publish("vehicle_attitude", att); });
+	check_bad_att([&]() { host::topics["vehicle_attitude"].clear(); });
+
+	// V9 regression 3: freeze & recovery across Lowering, WaitDown, Vacuum, Lowered, and Venting without PWM endpoint jump or command replay.
+	host::parameter<float>("VGS_SC_RATE", 400.f);
+	host::parameter<int32_t>("VGS_SC_LIFT_DLY", 60);
+	host::parameter<int32_t>("VGS_SC_VENT_DLY", 120);
+	host::parameter<int32_t>("VGS_SC_VAC_DLY", 120);
+	for (int i = 0; i < 55; ++i) { step(mode, false); }
+	step(mode, true);
+
+	auto test_phase_freeze = [&](vgsolar_robot::SuctionState target_state) {
+		// Turn on brush to verify recovery does not replay old brush or turn commands.
+		vgsolar_command_s p{}; p.command = vgsolar_command_s::CMD_PARAM_WRITE;
+		p.param_type = 3; p.param_index = 0x0104; p.param_value = 60; send(p);
+		p.param_index = 0x0101; p.param_value = 1; send(p); step(mode);
+		local.heading = 0.f;
+		send(turn()); step(mode);
+		if (target_state == vgsolar_robot::SuctionState::Venting) {
+			for (int i = 0; i < 250 && status().turn_phase != 4; ++i) { step(mode); }
+			assert(status().turn_phase == 4);
+			for (int i = 1; i <= 20 && mode._suction.state() != target_state; ++i) { local.heading = -.1f * i; step(mode); }
+		} else {
+			for (int i = 0; i < 250 && mode._suction.state() != target_state; ++i) { step(mode); }
+		}
+		assert(mode._suction.state() == target_state);
+		const float pwm_at_freeze = mode._suction.pwm();
+		const size_t events_before = host::topics["vgsolar_event"].size();
+		attitude_roll = math::radians(40.f); step(mode);
+		assert(status().suction_frozen && !status().motion_allowed && !host::gpio[GPIO_VG_PUMP_OFF]);
+		assert(fabsf(mode._suction.pwm() - pwm_at_freeze) < 1e-3f);
+		assert(host::latest<actuator_servos_s>("actuator_servos").control[1] < -0.99f);
+		attitude_roll = 0.f; step(mode);
+		assert(status().state == 0 && !status().suction_frozen && status().turn_phase == 0 && !status().motion_allowed);
+		assert(!host::gpio[GPIO_VG_PUMP_OFF] && host::gpio[GPIO_VG_VALVE_OFF]);
+		// Must not jump immediately to raised_pwm (1900) if it was lowered/lowering.
+		if (pwm_at_freeze < 1880.f) {
+			assert(mode._suction.pwm() < 1899.f);
+		}
+		bool saw_turn_abort = false;
+		const auto &evq = host::topics["vgsolar_event"];
+		for (size_t idx = events_before; idx < evq.size(); ++idx) {
+			vgsolar_event_s ev{}; std::memcpy(&ev, evq[idx].data(), sizeof(ev));
+			if (ev.kind == 5 && !ev.accepted && ev.reason == 6) { saw_turn_abort = true; }
+		}
+		assert(saw_turn_abort);
+		// Re-freeze during recovery must not emit a duplicate turn failure or replay commands.
+		const size_t events_mid = host::topics["vgsolar_event"].size();
+		attitude_roll = math::radians(40.f); step(mode);
+		assert(status().suction_frozen && !host::gpio[GPIO_VG_PUMP_OFF] && host::gpio[GPIO_VG_VALVE_OFF]);
+		attitude_roll = 0.f; step(mode);
+		for (size_t idx = events_mid; idx < host::topics["vgsolar_event"].size(); ++idx) {
+			vgsolar_event_s ev{}; std::memcpy(&ev, host::topics["vgsolar_event"][idx].data(), sizeof(ev));
+			assert(ev.kind != 5);
+		}
+		for (int i = 0; i < 300 && !mode._suction.raised(); ++i) { step(mode); }
+		assert(mode._suction.raised() && status().state == 0 && !status().motion_allowed);
+		assert(host::latest<actuator_servos_s>("actuator_servos").control[1] < -0.99f);
+	};
+	test_phase_freeze(vgsolar_robot::SuctionState::Lowering);
+	test_phase_freeze(vgsolar_robot::SuctionState::WaitDown);
+	test_phase_freeze(vgsolar_robot::SuctionState::Vacuum);
+	test_phase_freeze(vgsolar_robot::SuctionState::Lowered);
+	test_phase_freeze(vgsolar_robot::SuctionState::Venting);
+
 	puts("PASS: production mode registration, queued command priority, watchdog, arm edge, nav rejection/reset, suction turn/noise/completion/heading reset, optional wheel feedback/source latch/capture failure/standstill, tilt recovery, brush/battery, range-clear handshake, safe reboot");
 }

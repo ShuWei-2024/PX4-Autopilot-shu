@@ -91,5 +91,77 @@ int main() {
  input.blade = true;
  for(unsigned i=0;i<150 && !cup.raised();++i) { now+=10000; cup.tick(now,true,input); }
  assert(cup.raised() && !cup.fault());
+
+	// Freeze & emergency_release across Lowering, WaitDown, Vacuum, Venting, Raising, WaitUp:
+	// never jump PWM to an endpoint and never re-seal an already releasing cup.
+	config = fast_config();
+	config.slew_us_s = 1000.f; // 10 us per 10 ms tick so Lowering/Raising take multiple steps
+	cup.configure(config);
+	input = {true, true, true, true, -60.f};
+
+	// Lowering -> freeze -> emergency_release -> Venting -> Raising -> Raised (no PWM jump)
+	assert(cup.lower(now));
+	now += 10000; cup.tick(now, true, input);
+	const float mid_lower_pwm = cup.pwm();
+	assert(mid_lower_pwm < config.raised_pwm && mid_lower_pwm > config.lowered_pwm);
+	cup.freeze();
+	assert(cup.frozen() && !cup.pump() && !cup.sealed() && cup.pwm() == mid_lower_pwm);
+	cup.emergency_release(now);
+	assert(!cup.frozen() && cup.state() == SuctionState::Venting && !cup.pump() && !cup.sealed() && cup.pwm() == mid_lower_pwm);
+	for (unsigned i = 0; i < 200 && !cup.raised(); ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.raised() && !cup.fault());
+
+	// WaitDown -> freeze -> emergency_release -> smooth release
+	assert(cup.lower(now));
+	for (unsigned i = 0; i < 150 && cup.state() != SuctionState::WaitDown; ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.state() == SuctionState::WaitDown);
+	cup.freeze();
+	assert(cup.frozen() && !cup.pump() && !cup.sealed() && cup.pwm() == config.lowered_pwm);
+	cup.emergency_release(now);
+	assert(cup.state() == SuctionState::Venting && !cup.pump() && !cup.sealed() && cup.pwm() == config.lowered_pwm);
+	for (unsigned i = 0; i < 200 && !cup.raised(); ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.raised() && !cup.fault());
+
+	// Vacuum -> freeze -> emergency_release -> smooth release (never jumps to raised_pwm)
+	assert(cup.lower(now));
+	for (unsigned i = 0; i < 150 && cup.state() != SuctionState::WaitDown; ++i) { now += 10000; cup.tick(now, true, input); }
+	input.blade = false;
+	for (unsigned i = 0; i < 10 && cup.state() != SuctionState::Vacuum; ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.state() == SuctionState::Vacuum && cup.pump() && cup.sealed());
+	cup.freeze();
+	assert(cup.frozen() && !cup.pump() && cup.pwm() == config.lowered_pwm);
+	cup.emergency_release(now);
+	assert(!cup.frozen() && cup.state() == SuctionState::Venting && !cup.pump() && !cup.sealed() && cup.pwm() == config.lowered_pwm);
+	input.blade = true;
+	for (unsigned i = 0; i < 200 && !cup.raised(); ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.raised() && !cup.fault());
+
+	// Re-freeze while Venting & Raising: must not re-seal or jump PWM, and long freeze must not false-timeout.
+	assert(cup.lower(now));
+	for (unsigned i = 0; i < 150 && cup.state() != SuctionState::WaitDown; ++i) { now += 10000; cup.tick(now, true, input); }
+	input.blade = false;
+	for (unsigned i = 0; i < 30 && !cup.lowered(); ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.lowered());
+	assert(cup.raise(now) && cup.state() == SuctionState::Venting);
+	cup.freeze();
+	assert(cup.frozen() && !cup.pump() && !cup.sealed() && cup.pwm() == config.lowered_pwm);
+	now += 5000000; // > action_timeout_ms while frozen
+	cup.tick(now, true, input);
+	assert(!cup.fault());
+	cup.emergency_release(now);
+	assert(!cup.frozen() && cup.state() == SuctionState::Venting && !cup.pump() && !cup.sealed());
+	for (unsigned i = 0; i < 50 && cup.state() != SuctionState::Raising; ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.state() == SuctionState::Raising);
+	now += 10000; cup.tick(now, true, input);
+	const float mid_raise_pwm = cup.pwm();
+	assert(mid_raise_pwm > config.lowered_pwm && mid_raise_pwm < config.raised_pwm);
+	cup.freeze();
+	assert(cup.frozen() && !cup.pump() && !cup.sealed() && cup.pwm() == mid_raise_pwm);
+	cup.emergency_release(now);
+	assert(!cup.frozen() && cup.state() == SuctionState::Raising && cup.pwm() == mid_raise_pwm);
+	input.blade = true;
+	for (unsigned i = 0; i < 200 && !cup.raised(); ++i) { now += 10000; cup.tick(now, true, input); }
+	assert(cup.raised() && !cup.fault());
+
 	puts("PASS: suction sequence, ramp, IR transition, pressure debounce/loss, freeze, release, stale input and timed fallback");
 }

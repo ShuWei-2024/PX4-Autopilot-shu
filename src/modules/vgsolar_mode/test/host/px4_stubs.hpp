@@ -36,6 +36,7 @@ static std::map<int, bool> gpio;
 static std::vector<std::string> param_names;
 static std::map<std::string, Message> parameters;
 static bool reboot_requested = false;
+static void (*on_copy)(const char *name) = nullptr;
 template<typename T> void publish(const char *name, const T &value) {
 	Message bytes(sizeof(T)); std::memcpy(bytes.data(), &value, sizeof(T));
 	topics[name].push_back(bytes);
@@ -108,6 +109,7 @@ public:
 	uint8_t get_instance() const { return _instance; }
 	bool ChangeInstance(uint8_t instance) { _instance = instance; _cursor = 0; return true; }
 	template<typename T> bool copy(T *value) {
+		if (host::on_copy) { host::on_copy(_name); }
 		if (_instance != 0) { return false; } // No secondary estimator sample in this host model.
 		auto &queue = host::topics[_name];
 		if (queue.empty()) { return false; }

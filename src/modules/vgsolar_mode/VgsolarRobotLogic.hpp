@@ -49,22 +49,29 @@ public:
 	}
 	// A request is not proof of physical completion. Repeated requests never restart vent timing.
  void emergency_release(uint64_t now) {
-  if (_state == SuctionState::Raised) { _pump = _sealed = false; return; }
+  if (_state == SuctionState::Raised) { _frozen = false; _pump = _sealed = false; return; }
+  const bool was_frozen = _frozen;
   _frozen = false;
-  if (_state == SuctionState::Venting || _state == SuctionState::Raising || _state == SuctionState::WaitUp) { return; }
+  if (_state == SuctionState::Venting || _state == SuctionState::Raising || _state == SuctionState::WaitUp) {
+   _pump = _sealed = false;
+   if (was_frozen) {
+    _action_start = now;
+    if (_state == SuctionState::WaitUp && _blade_since == 0) { _phase_start = now; }
+   }
+   return;
+  }
   _fault = false; raise(now);
  }
  void clear_fault() { _fault = false; _vacuum_warning = false; release(); }
 	void freeze() {
-  if (!_frozen) { _frozen_ready = _state == SuctionState::Lowered || _state == SuctionState::Venting
-      || _state == SuctionState::Raising || _state == SuctionState::WaitUp; }
+  if (!_frozen) { _frozen_ready = _state == SuctionState::Lowered; }
   _frozen = true; _pump = false;
   if (_frozen_ready) { _sealed = true; _pwm = _config.lowered_pwm; }
  }
 	void unfreeze() {
 		_frozen = false;
 		if (_frozen_ready) { _state = SuctionState::Lowered; _pump = _sealed = true; }
-		else { release(); }
+		else { emergency_release(_last_update); }
 	}
 	void tick(uint64_t now, bool enabled, const Inputs &input) {
 		const float dt = _last_update != 0 && now >= _last_update ? fminf((now - _last_update) * 1e-6f, 0.1f) : 0.f;
